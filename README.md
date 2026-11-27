@@ -21,6 +21,9 @@ cuando una acción llega al precio que tú marques.
 | **Siguiendo** | Tus empresas con precio en vivo, alertas de precio mínimo/máximo, probabilidad de que toquen tu precio, y "Modo vigilancia" (mantiene la pantalla encendida). |
 | **🎯 Análisis profundo** | Para las empresas que sigues: 10,000 escenarios con el efecto de las noticias de último momento. Se recalcula solo cuando sale una noticia o el precio se mueve más de 1.5%. Te dice **Compra ahora / Preferible esperar unos días para comprar / Vende en unos días / Vende ahora / Mantén**, con cuánto podría bajar o subir mañana, en 1 semana y en 1 mes. |
 | **📏 Precisión medida** | Prueba histórica: las mismas reglas aplicadas semana a semana a 10 años de precios reales (sin ver el futuro) y comparadas con lo que pasó. Muestra si cada sugerencia acierta más que el azar, si los rangos están calibrados y si seguirlas gana más que comprar y mantener. Con tus claves puedes repetirla desde la app. |
+| **📊 Ranking por factores** | Ordena tus empresas por un factor (tendencia de 12 meses, baja volatilidad, rebote…) **solo si pasó la prueba fuera de muestra**. Hoy ninguno la pasó, así que la app lo dice en vez de mostrar un ranking "para comprar". |
+| **💼 Cuenta virtual** | Dinero simulado con precios reales y costos (0.05% comisión + 0.05% deslizamiento): tus operaciones, un robot de factores, un robot que sigue las sugerencias y el S&P 500 como referencia, con métricas completas. Nunca se conecta a un bróker. |
+| **📓 Diario de señales** | Cada sugerencia queda registrada con su precio y a los 5 días hábiles se anota si acertó: la prueba en vivo, sin trampa posible. |
 | **Noticias** | Noticias del mercado y de tus empresas con sentimiento automático (positiva/negativa/neutral). |
 | **🔔 Notificaciones** | Señales nuevas de COMPRA/VENTA, eventos técnicos (cruce dorado, MACD, RSI) y alertas de precio, con sonido y vibración. |
 
@@ -82,16 +85,35 @@ límites gratuitos; después usa caché y es rápido.
 
 ## 📏 Resultado de la prueba histórica (29 empresas, 2016–2026, 14,631 decisiones)
 
+Márgenes de error por bootstrap agrupado por semana (las empresas se mueven juntas).
+
 | Qué se midió | Resultado |
 |---|---|
 | Rango del 90% a 1 día / 1 semana / 1 mes | El precio real quedó dentro el **89.1% / 89.3% / 90.1%** de las veces → **bien calibrado** |
-| "Compra ahora" | 58.3% de aciertos vs 56.2% al azar → **sin ventaja demostrada** |
-| "Esperar unos días para comprar" | 47.1% vs 49.5% → **peor que el azar** |
-| "Vende en unos días" | 55.6% vs 60.2% → **peor que el azar** |
-| "Vende ahora" | 42.5% vs 43.9% → **sin ventaja demostrada** |
-| Seguir las sugerencias | 8.7% al año vs 23.4% comprar y mantener (y 15.0% el S&P 500) |
+| "Compra ahora" | 58.2% vs 56.2% al azar (+2.1 pts, de −1.5 a +5.9) → **igual que el azar** |
+| "Esperar unos días para comprar" | 47.0% vs 49.5% (−2.4 pts, de −5.8 a +0.8) → **igual que el azar** |
+| "Vende en unos días" | 55.6% vs 60.2% (−4.6 pts, de −6.9 a −2.2) → **peor que el azar** |
+| "Vende ahora" | 42.4% vs 43.9% → **igual que el azar** |
 
-Conclusión honesta: los rangos de riesgo son confiables; las sugerencias de compra/venta, todavía no.
+| Portafolio (29 empresas, semanal) | Ganancia anual | Sharpe | Peor caída |
+|---|---|---|---|
+| Seguir las sugerencias | 10.0% | 1.07 | −15% |
+| Señal COMPRA/VENTA | 15.8% | 1.30 | −18% |
+| Las 29 en partes iguales | 28.1% | 1.41 | −27% |
+| S&P 500 | 15.5% | 0.91 | −29% |
+
+Las sugerencias aciertan el 78% de sus operaciones y aun así ganan menos: pasan ~70% del tiempo en efectivo.
+
+## 📊 Estudio de factores (104 grandes empresas de EE.UU.)
+
+Protocolo fijado de antemano: dirección de cada factor elegida con 2016–2021, evaluación a ciegas en 2022–2026,
+corrección por pruebas múltiples (Benjamini-Hochberg) y simulación de comprar el 20% mejor clasificado con costos.
+
+- **Ninguno quedó validado.** El más cercano: tendencia de 12 meses sin el último mes (IC de prueba +0.023, p = 0.052),
+  que coincide con décadas de evidencia académica. El robot de la cuenta virtual lo está probando con dinero simulado.
+- Los puntajes propios de Pulso no predicen qué acción lo hará mejor (IC ≈ 0).
+
+Conclusión honesta: los rangos de riesgo son confiables; las sugerencias de compra/venta y los factores, todavía no.
 La prueba solo mide las reglas técnicas y la simulación (no hay historial gratuito de fundamentales y noticias).
 
 ## ⚠️ Limitaciones (siendo sinceros)

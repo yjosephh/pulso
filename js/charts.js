@@ -199,3 +199,35 @@ export function priceChart(el, bars, { sma50 = [], sma200 = [] } = {}) {
   };
   return ctrl;
 }
+
+// Curvas de capital normalizadas (% de ganancia desde el inicio) para la cuenta virtual.
+export function equityChart(series, { h = 180 } = {}) {
+  const W = 340;
+  const pl = 4;
+  const pr = 52;
+  const pt = 10;
+  const pb = 16;
+  const all = series.filter((s) => s.pts.length >= 2);
+  if (!all.length) return '<p class="hint">La gráfica aparece cuando haya al menos dos registros (se guarda uno por hora mientras usas la app).</p>';
+  const t0 = Math.min(...all.map((s) => s.pts[0].t));
+  const t1 = Math.max(...all.map((s) => s.pts[s.pts.length - 1].t));
+  const norm = all.map((s) => ({ ...s, r: s.pts.map((p) => ({ t: p.t, y: p.v / s.pts[0].v - 1 })) }));
+  const ys = norm.flatMap((s) => s.r.map((p) => p.y));
+  let lo = Math.min(0, ...ys);
+  let hi = Math.max(0, ...ys);
+  const pad = (hi - lo || 0.01) * 0.12;
+  lo -= pad;
+  hi += pad;
+  const x = (t) => pl + ((t - t0) / Math.max(1, t1 - t0)) * (W - pl - pr);
+  const y = (v) => pt + (1 - (v - lo) / (hi - lo)) * (h - pt - pb);
+  const lines = norm.map((s) => {
+    const d = s.r.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)} ${y(p.y).toFixed(1)}`).join(' ');
+    const lastP = s.r[s.r.length - 1];
+    return `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round"/>
+      <text x="${W - pr + 4}" y="${(y(lastP.y) + 4).toFixed(1)}" fill="${s.color}" font-size="10" font-family="JetBrains Mono, monospace">${Math.abs(lastP.y) < 0.0005 ? '' : lastP.y > 0 ? '+' : ''}${(Math.abs(lastP.y) < 0.0005 ? 0 : lastP.y * 100).toFixed(1)}%</text>`;
+  }).join('');
+  return `<svg class="fan" viewBox="0 0 ${W} ${h}" role="img" aria-label="Evolución de las cuentas virtuales">
+    <line x1="${pl}" x2="${W - pr}" y1="${y(0).toFixed(1)}" y2="${y(0).toFixed(1)}" stroke="rgba(255,255,255,.25)" stroke-dasharray="3 4"/>
+    ${lines}
+  </svg>`;
+}

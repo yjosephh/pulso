@@ -2,13 +2,15 @@
 import { UNIVERSE, INDICES, SECTORS, sectorName } from './universe.js';
 import { createProvider, LiveProvider, isoDate, hashStr } from './data.js';
 import { analyze, marketPulse, simulate, sma, sentiment, deepAnalysis } from './analysis.js';
-import { sparkline, gauge, ring, fanChart, priceChart } from './charts.js';
+import { sparkline, gauge, ring, fanChart, priceChart, equityChart } from './charts.js';
 import {
   notify, Alerts, configureNotify, unlockAudio, notifPermission, notifSupported,
   requestNotifPermission, getHistory, unreadCount, markAllRead, clearHistory,
 } from './notify.js';
 import { load, save, clearCache, clearAll } from './store.js';
-import { runBacktest } from './backtest.js';
+import { runBacktest, HIT, baseRates } from './backtest.js';
+import { factorStudy, liveFactorRanking, FACTOR_NAME, HORIZONS } from './factors.js';
+import { PaperBook, SignalJournal, ACCOUNTS, PAPER_COSTS } from './paper.js';
 
 // ---------------------------------------------------------------------------
 // Utilidades
@@ -40,7 +42,7 @@ function ago(ts) {
 // Estado
 // ---------------------------------------------------------------------------
 const DEFAULTS = { mode: 'demo', finnhubKey: '', tdKey: '', scanEvery: 15, notifySignals: true, sound: true };
-const TABS = ['mercado', 'ranking', 'siguiendo', 'noticias', 'ajustes', 'precision'];
+const TABS = ['mercado', 'ranking', 'siguiendo', 'noticias', 'ajustes', 'precision', 'cuenta'];
 
 const state = {
   settings: { ...DEFAULTS, ...load('settings', {}) },
@@ -77,6 +79,11 @@ const state = {
   raw: {},
   newsSeen: load('newsSeen', {}),
   bt: { ref: null, user: load('bt:user', null), show: 'auto', running: false, stop: false, prog: null, refLoading: true },
+  fs: { ref: null, refApp: null, user: load('fs:user', null) },
+  factorRank: null,
+  factorEntry: load('factorEntry', null),
+  paper: null,
+  journal: null,
 };
 configureNotify({ sound: state.settings.sound });
 
@@ -166,6 +173,7 @@ function viewMercado() {
       ${hero}
     </section>
     ${precisionCard()}
+    ${paperCard()}
     <section>
       <div class="sec-title"><h3>Índices</h3><span class="muted">${esc(state.status ? state.status.label : '')}</span></div>
       <div class="idx-grid">${idx}</div>
@@ -200,6 +208,7 @@ function rowHtml(a, rank, horizon) {
 
 function viewRanking() {
   const h = state.rankHorizon;
+  if (h === 'factors') return viewFactorRank();
   let list = analysesList();
   if (state.rankFilter !== 'all') list = list.filter((a) => a.sec === state.rankFilter);
   list.sort((a, b) => (h === 'short' ? b.scoreShort - a.scoreShort : b.scoreLong - a.scoreLong));
@@ -208,10 +217,7 @@ function viewRanking() {
   return `
     <div class="page-head"><h2>Ranking de oportunidades</h2>
       <p>${n} empresas · ${(n * 2000).toLocaleString('en-US')} escenarios simulados por análisis</p></div>
-    <div class="seg">
-      <button class="${h === 'long' ? 'active' : ''}" data-horizon="long">🌱 Largo plazo</button>
-      <button class="${h === 'short' ? 'active' : ''}" data-horizon="short">⚡ Corto plazo</button>
-    </div>
+    ${rankSeg(h)}
     <div class="chips">
       <button class="chip ${state.rankFilter === 'all' ? 'active' : ''}" data-filter="all">Todas</button>
       ${SECTORS.map((s) => `<button class="chip ${state.rankFilter === s.id ? 'active' : ''}" data-filter="${s.id}">${s.icon} ${s.name}</button>`).join('')}
@@ -269,6 +275,7 @@ function viewSiguiendo() {
   const wl = 'wakeLock' in navigator;
   return `
     <div class="page-head"><h2>En seguimiento</h2><p>Noticias en vivo · 10,000 escenarios por empresa · alertas instantáneas</p></div>
+    <a class="card prec-link" href="#/cuenta"><b>💼 Cuenta virtual</b><span class="muted small">Prueba con dinero simulado: tus operaciones, los robots y el S&amp;P 500 →</span></a>
     <div class="card search">
       <input id="search" type="search" placeholder="🔍 Buscar empresa para seguir (ej. Tesla, KO)" autocomplete="off" enterkeyhint="search">
       <div id="search-res" class="search-res"></div>
@@ -398,8 +405,15 @@ async function loadBtRef() {
     const r = await fetch('data/backtest-ref.json', { cache: 'no-cache' });
     state.bt.ref = r.ok ? await r.json() : null;
   } catch { state.bt.ref = null; }
+  try {
+    const r2 = await fetch('data/factors-ref.json', { cache: 'no-cache' });
+    const j = r2.ok ? await r2.json() : null;
+    state.fs.ref = j && j.big;
+    state.fs.refApp = j && j.app;
+  } catch { /* sin estudio de factores */ }
   state.bt.refLoading = false;
-  if (state.tab === 'precision' || state.tab === 'mercado') scheduleRender();
+  if (!state.scanning && analysesList().length) afterScanPhase1();
+  if (['precision', 'mercado', 'ranking', 'cuenta'].includes(state.tab)) scheduleRender();
   if (state.detail) renderDetailBody();
 }
 
@@ -491,7 +505,7 @@ function viewPrecision() {
   const codeRow = (label, c) => (c && c.n ? `<div class="bt-row">
       <div class="bt-name">${label}<small>${c.n.toLocaleString('en-US')} veces · cuenta como acierto si ${esc(c.desc)}</small></div>
       <div class="bt-nums"><b>${pp(c.hit)}</b><small>azar ${pp(c.base)}</small></div>
-      <div class="bt-edge"><span class="sig ${VERDICT[c.verdict][0]}">${VERDICT[c.verdict][1]}</span><small>${pts(c.edge)} · margen ±${(c.ci * 100).toFixed(1)}</small></div>
+      <div class="bt-edge"><span class="sig ${VERDICT[c.verdict][0]}">${VERDICT[c.verdict][1]}</span><small>${pts(c.edge)}${Number.isFinite(c.lo) ? ` (de ${pts(c.lo)} a ${pts(c.hi)})` : ` · margen ±${(c.ci * 100).toFixed(1)}`}</small></div>
     </div>` : '');
   const cov = (h, label) => {
     const c = R.coverage[h];
@@ -528,19 +542,22 @@ function viewPrecision() {
     </section>
     <section class="card">
       <h3>💰 ¿Seguir a Pulso gana más que comprar y mantener?</h3>
-      <div class="ind-grid">
-        ${stat('Seguir sugerencias', pp(S.deep.cagr) + ' /año', `caída máx. ${pp(S.deep.mdd, 0)} · invertido ${pp(S.deep.exposure, 0)} del tiempo · ${Math.round(S.deep.trades)} operaciones`, S.deep.cagr > S.bh.cagr)}
-        ${stat('Seguir señal COMPRA/VENTA', pp(S.sig.cagr) + ' /año', `caída máx. ${pp(S.sig.mdd, 0)} · invertido ${pp(S.sig.exposure, 0)} del tiempo · ${Math.round(S.sig.trades)} operaciones`, S.sig.cagr > S.bh.cagr)}
-        ${stat('Comprar y mantener', pp(S.bh.cagr) + ' /año', `caída máx. ${pp(S.bh.mdd, 0)} (promedio por empresa)`, null)}
-        ${R.spy ? stat('S&P 500 (SPY)', pp(R.spy.cagr) + ' /año', `caída máx. ${pp(R.spy.mdd, 0)}`, null) : ''}
-      </div>
-      <p class="hint">Promedio por empresa, con decisiones una vez por semana. Las estrategias pasan tiempo fuera del mercado; por eso suelen tener caídas máximas menores pero también menos ganancia.</p>
+      ${S.deep && S.deep.sharpe !== undefined ? metricsTable([['Seguir sugerencias', S.deep], ['Señal COMPRA/VENTA', S.sig], [`Las ${S.n} en partes iguales`, S.bh], ['S&P 500', S.spy || R.spy]]) : `<div class="ind-grid">
+        ${stat('Seguir sugerencias', pp(S.deep.cagr) + ' /año', `caída máx. ${pp(S.deep.mdd, 0)}`, S.deep.cagr > S.bh.cagr)}
+        ${stat('Seguir señal COMPRA/VENTA', pp(S.sig.cagr) + ' /año', `caída máx. ${pp(S.sig.mdd, 0)}`, S.sig.cagr > S.bh.cagr)}
+        ${stat('Comprar y mantener', pp(S.bh.cagr) + ' /año', `caída máx. ${pp(S.bh.mdd, 0)}`, null)}
+      </div>`}
+      <p class="hint">Portafolio con el dinero repartido en partes iguales entre las ${S.n} empresas, decisiones una vez por semana y ${(R.commission * 100).toFixed(1)}% de comisión por operación. Sharpe y Sortino miden ganancia por unidad de riesgo (más de 1 es bueno); Calmar = ganancia anual / peor caída; Kelly = qué fracción del capital apostaría la fórmula (negativo = no apostar).</p>
     </section>
     <details class="card">
       <summary>🏢 Resultado por empresa</summary>
       <table class="bt-table"><thead><tr><th></th><th>Rango 90% (1 sem)</th><th>Sugerencias</th><th>Señal</th><th>Comprar y mantener</th></tr></thead><tbody>${perRows}</tbody></table>
       <p class="hint">Rendimiento anual promedio de cada forma de invertir en esa empresa.</p>
     </details>
+    ${factorSection(state.fs.ref, 'Factores: ¿alguno predice qué acciones lo harán mejor que las demás?')}
+    ${factorSection(state.fs.refApp, 'Réplica con las empresas de Pulso')}
+    ${state.fs.user ? factorSection(state.fs.user, 'Factores con tus datos') : ''}
+    ${journalSection()}
     <section class="card">
       <h3>⚠️ Lo que esta prueba NO mide</h3>
       <ul class="bt-concl">
@@ -548,6 +565,7 @@ function viewPrecision() {
         <li>Sesgo de supervivencia: las empresas son las ganadoras de hoy; en 2016 nadie sabía que NVIDIA o Lilly subirían tanto. Eso infla el "comprar y mantener".</li>
         <li>Un solo periodo (mayormente alcista). En un mercado bajista largo los resultados podrían ser distintos.</li>
         <li>No incluye impuestos ni el diferencial de precio al comprar/vender.</li>
+        <li>Los márgenes de error se calculan agrupando por semana (las empresas se mueven juntas); aun así, un periodo de 10 años es corto para conclusiones definitivas.</li>
       </ul>
     </section>
     ${runBox}
@@ -583,8 +601,21 @@ async function runUserBacktest() {
     res = await runBacktest(datasets, {
       source: 'Twelve Data · tus datos (precios ajustados)',
       shouldStop: () => b.stop,
-      onProgress: (p) => { b.prog = { phase: 'Probando reglas en', sym: p.sym, i: p.i, total: p.total, frac: 0.5 + p.frac * 0.5 }; upd(); },
+      onProgress: (p) => { b.prog = { phase: 'Probando reglas en', sym: p.sym, i: p.i, total: p.total, frac: 0.5 + p.frac * 0.4 }; upd(); },
     });
+    const spyD = datasets.find((d) => d.meta.s === 'SPY');
+    const stocksD = datasets.filter((d) => d.meta.s !== 'SPY');
+    if (!b.stop && spyD && stocksD.length >= 10) {
+      try {
+        const fres = await factorStudy(stocksD, spyD.bars, {
+          source: 'Twelve Data · tus datos (precios ajustados)',
+          label: `Tus ${stocksD.length} empresas`,
+          onProgress: (f) => { b.prog = { phase: 'Probando factores', sym: '', i: 0, total: 1, frac: 0.9 + f * 0.1 }; upd(); },
+        });
+        state.fs.user = fres;
+        save('fs:user', fres);
+      } catch { /* el estudio de factores es opcional */ }
+    }
   }
   b.running = false;
   b.prog = null;
@@ -599,7 +630,314 @@ async function runUserBacktest() {
   if (state.tab === 'precision') renderView();
 }
 
-const VIEWS = { mercado: viewMercado, ranking: viewRanking, siguiendo: viewSiguiendo, noticias: viewNoticias, ajustes: viewAjustes, precision: viewPrecision };
+// ---------------------------------------------------------------------------
+// Fase 1: factores validados, cuenta virtual y diario de señales
+// ---------------------------------------------------------------------------
+const pxOf = (sym) => {
+  const q = state.quotes[sym];
+  return q && q.price > 0 ? q.price : NaN;
+};
+const pctS = (x, d = 1) => {
+  if (!Number.isFinite(x)) return '—';
+  const v = Math.abs(x) < 0.5 * 10 ** -(d + 2) ? 0 : x; // evita mostrar -0.0%
+  return (v >= 0 ? '+' : '') + (v * 100).toFixed(d) + '%';
+};
+const fmtIC = (x) => (Number.isFinite(x) ? (x >= 0 ? '+' : '') + x.toFixed(3) : '—');
+const num2 = (x) => (Number.isFinite(x) ? x.toFixed(2) : '—');
+const SHORT = { mom12_1: 'Tendencia 12 meses', high52: 'Cerca de máximos', trend200: 'Sobre media 200d', rev1w: 'Rebote 1 semana', rev1m: 'Rebote 1 mes', lowvol: 'Baja volatilidad', rsi14: 'RSI', pulsoShort: 'Pulso corto', pulsoLong: 'Pulso largo', composite: 'Combinación' };
+const entryKey = (r) => r.id + ':' + r.h;
+const FVERDICT = { validado: ['buy', 'VALIDADO'], prometedor: ['hold', 'PROMETEDOR'], no: ['sell', 'NO VALIDADO'] };
+
+function metricsTable(cols) {
+  const rows = [
+    ['Ganancia anual (CAGR)', (m) => pp(m.cagr)],
+    ['Sharpe', (m) => num2(m.sharpe)],
+    ['Sortino', (m) => num2(m.sortino)],
+    ['Peor caída', (m) => pp(m.mdd, 0)],
+    ['Calmar', (m) => num2(m.calmar)],
+    ['Años en la peor caída', (m) => (Number.isFinite(m.maxDdYears) ? m.maxDdYears.toFixed(1) : '—')],
+    ['Operaciones', (m) => (m.trades ? m.trades.toLocaleString('en-US') : '—')],
+    ['% operaciones ganadoras', (m) => (m.winRate != null ? pp(m.winRate, 0) : '—')],
+    ['Factor de beneficio', (m) => num2(m.profitFactor)],
+    ['Ganancia media por operación', (m) => (m.expectancy != null ? pctS(m.expectancy) : '—')],
+    ['Kelly', (m) => (m.kelly != null ? pctS(m.kelly, 0) : '—')],
+    ['SQN', (m) => num2(m.sqn)],
+  ];
+  return `<div class="m-wrap"><table class="bt-table m-table"><thead><tr><th></th>${cols.map(([l]) => `<th>${esc(l)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(([label, f]) => `<tr><td>${label}</td>${cols.map(([, m]) => `<td>${m ? f(m) : '—'}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+}
+
+function factorRow(r) {
+  const v = FVERDICT[r.verdict];
+  const ex = r.strat.test.excess;
+  return `<div class="bt-row">
+    <div class="bt-name">${esc(r.name)}${r.sign < 0 ? ' <small style="display:inline">(al revés: gana lo de abajo)</small>' : ''}
+      <small>IC entrenamiento ${fmtIC(r.train.ic)} · IC prueba ${fmtIC(r.test.ic)} (de ${fmtIC(r.test.lo)} a ${fmtIC(r.test.hi)}) · q = ${Number.isFinite(r.test.q) ? r.test.q.toFixed(2) : '—'}${r.members ? ' · combina: ' + r.members.map((m) => SHORT[m.id] || m.id).join(', ') : ''}</small></div>
+    <div class="bt-nums"><b class="${ex.ann > 0 ? 'up' : 'down'}">${pctS(ex.ann)}</b><small>top 20% vs promedio /año</small></div>
+    <div class="bt-edge"><span class="sig ${v[0]}">${v[1]}</span><small>${pp(r.strat.test.port && r.strat.test.port.cagr)} al año vs ${pp(r.strat.test.ew && r.strat.test.ew.cagr)} promedio</small></div>
+  </div>`;
+}
+
+function factorSection(F, title) {
+  if (!F) return '';
+  const nVal = F.results.filter((r) => r.verdict === 'validado').length;
+  const byH = HORIZONS.map((H) => {
+    const list = F.results.filter((r) => r.h === H.h);
+    return list.length ? `<h4 class="sub" style="margin:14px 0 2px;font-size:14px">Mantener ${H.label}</h4>${list.map(factorRow).join('')}` : '';
+  }).join('');
+  return `<section class="card">
+    <h3>📊 ${title}</h3>
+    <p class="hint" style="margin-top:0">${esc(F.label)}. Entrenamiento: ${F.period.from} a 2021 (solo para elegir la dirección de cada factor). Prueba a ciegas: ${F.period.testFrom} a ${F.period.to}. IC = qué tan bien coincide el orden del factor con el orden real de ganancias (0 = nada; en finanzas 0.03 a 0.05 ya es útil). q = probabilidad de que sea suerte tras corregir por probar ${F.results.length} ideas.</p>
+    <div class="concl-line tone-${nVal ? 'good' : 'bad'}">${nVal ? `✅ ${nVal} quedó validado en los años de prueba.` : '❌ Ninguno quedó validado en los años de prueba.'}</div>
+    ${byH}
+    <p class="hint">VALIDADO = q &lt; 0.10, IC positivo en la prueba y el 20% de arriba le ganó al promedio después de costos (${(F.cost * 100).toFixed(1)}% por operación). PROMETEDOR = señal débil sin confirmar.</p>
+  </section>`;
+}
+
+const baseCache = new Map();
+function liveBase(sym, code) {
+  const h = state.hist[sym];
+  if (!h || h.length < 30 || !HIT[code]) return NaN;
+  let rates = baseCache.get(sym);
+  if (!rates) {
+    const c = h.map((b) => b.close);
+    const ev = [];
+    for (let i = 0; i + 5 < c.length; i++) {
+      const w = c.slice(i + 1, i + 6);
+      ev.push({ r5: c[i + 5] / c[i] - 1, r21: 0, min5: Math.min(...w) / c[i] - 1, max5: Math.max(...w) / c[i] - 1 });
+    }
+    rates = baseRates(ev);
+    baseCache.set(sym, rates);
+  }
+  return HIT[code].base(rates);
+}
+
+function journalSection() {
+  const J = state.journal;
+  if (!J) return '';
+  J.evaluate((sym) => state.hist[sym]);
+  const st = J.stats(liveBase);
+  const rows = Object.keys(HIT).map((k) => {
+    const x = st[k];
+    return `<tr><td>${REC_LABEL[k]}</td><td>${x.n}</td><td>${x.n ? pp(x.hit) : '—'}</td><td>${x.n && Number.isFinite(x.base) ? pp(x.base) : '—'}</td><td>${x.pending}</td></tr>`;
+  }).join('');
+  const recent = J.list.slice(0, 10).map((e) => {
+    const ok = e.r5 != null && HIT[e.code] ? HIT[e.code].hit(e) : null;
+    return `<div class="tr-row"><b>${esc(e.sym)}</b> ${REC_LABEL[e.code] || esc(e.label)} a ${money(e.price, curOf(e.sym))}
+      ${e.r5 != null ? `<span class="${ok ? 'up' : 'down'}">${ok ? '✅' : '❌'} ${pctS(e.r5)} en 1 semana</span>` : '<span class="muted">⏳ esperando 5 días hábiles</span>'}<small>${e.date}</small></div>`;
+  }).join('');
+  return `<section class="card">
+    <h3>📓 Diario de señales en vivo</h3>
+    <p class="hint" style="margin-top:0">Cada sugerencia para tus empresas seguidas queda registrada con su precio; a los 5 días hábiles se anota si acertó. Es la prueba hacia adelante: no se puede hacer trampa porque ese futuro aún no existía. Se necesitan al menos 30 señales evaluadas por tipo para concluir algo.</p>
+    <table class="bt-table"><thead><tr><th>Sugerencia</th><th>Evaluadas</th><th>Aciertos</th><th>Azar</th><th>Pendientes</th></tr></thead><tbody>${rows}</tbody></table>
+    ${recent ? `<h4 class="sub" style="margin:14px 0 4px;font-size:13px">Últimas señales</h4>${recent}` : '<p class="hint">Aún no hay señales registradas. Sigue algunas empresas (★) para empezar.</p>'}
+    <p class="hint">${J.list.length} señales registradas en este dispositivo${state.provider && state.provider.mode === 'demo' ? ' · modo demo: con datos simulados esto no sirve como evidencia' : ''}.</p>
+  </section>`;
+}
+
+function validatedEntries() {
+  const F = state.fs.ref;
+  if (!F) return [];
+  return F.results.filter((r) => r.verdict === 'validado').sort((a, b) => b.test.ic - a.test.ic);
+}
+function currentEntry() {
+  const v = validatedEntries();
+  return v.find((r) => entryKey(r) === state.factorEntry) || v[0] || null;
+}
+// Si nada quedó validado, el robot de la cuenta virtual prueba (con dinero simulado)
+// el candidato "prometedor" con menor p cuya dirección coincide con la teoría.
+function candidateEntry() {
+  const F = state.fs.ref;
+  if (!F) return null;
+  const c = F.results.filter((r) => r.verdict === 'prometedor' && r.sign > 0 && r.strat.test.excess.ann > 0).sort((a, b) => a.test.p - b.test.p);
+  return c[0] || null;
+}
+function robotEntry() {
+  const v = currentEntry();
+  if (v) return { entry: v, validated: true };
+  const c = candidateEntry();
+  return c ? { entry: c, validated: false } : null;
+}
+
+function computeFactorRanking() {
+  const re = robotEntry();
+  if (!re) {
+    state.factorRank = null;
+    return;
+  }
+  const { entry, validated } = re;
+  const datasets = allCompanies().filter((c) => !c.intl).map((c) => {
+    const h = state.hist[c.s];
+    if (!h || h.length < 260) return null;
+    const closes = h.map((b) => b.close);
+    const times = h.map((b) => b.time);
+    const q = state.quotes[c.s];
+    if (q && q.price > 0) {
+      const d = isoDate(new Date(q.ts || Date.now()));
+      if (d > times[times.length - 1]) {
+        closes.push(q.price);
+        times.push(d);
+      } else if (d === times[times.length - 1]) closes[closes.length - 1] = q.price;
+    }
+    return { meta: c, closes, times };
+  }).filter(Boolean);
+  state.factorRank = { entry, validated, list: liveFactorRanking(entry, datasets), at: Date.now() };
+}
+
+function afterScanPhase1() {
+  computeFactorRanking();
+  const P = state.paper;
+  if (!P) return;
+  P.ensureSpy(pxOf);
+  const fr = state.factorRank;
+  if (fr && fr.list.length >= 5) {
+    const K = Math.max(3, Math.round(0.2 * fr.list.length));
+    const targets = fr.list.slice(0, K).map((x) => x.sym).filter((sym) => pxOf(sym) > 0);
+    const label = (SHORT[fr.entry.id] || fr.entry.name) + (fr.validated ? '' : ', candidato sin validar');
+    if (P.rebalanceFactors(targets, pxOf, label)) {
+      toast({ title: '📊 Robot de factores rebalanceó (simulado)', body: `${label} · top 20%: ${targets.join(', ')}`, kind: 'info' });
+    }
+  }
+  P.snapshot(pxOf);
+  if (state.journal) state.journal.evaluate((sym) => state.hist[sym]);
+  if (['cuenta', 'ranking', 'mercado'].includes(state.tab)) scheduleRender();
+}
+
+const rankSeg = (h) => `<div class="seg">
+  <button class="${h === 'long' ? 'active' : ''}" data-horizon="long">🌱 Largo</button>
+  <button class="${h === 'short' ? 'active' : ''}" data-horizon="short">⚡ Corto</button>
+  <button class="${h === 'factors' ? 'active' : ''}" data-horizon="factors">📊 Factores</button>
+</div>`;
+
+function viewFactorRank() {
+  const F = state.fs.ref;
+  const head = `<div class="page-head"><h2>Ranking por factores</h2><p>Solo se muestra lo que pasó la prueba con años que no se usaron para diseñarlo</p></div>`;
+  if (!F) return head + rankSeg('factors') + (state.bt.refLoading ? '<div class="skel" style="height:160px"></div>' : '<div class="empty">No se encontró la investigación de factores.</div>');
+  const v = validatedEntries();
+  if (!v.length) {
+    const prom = F.results.filter((r) => r.verdict === 'prometedor');
+    return `${head}${rankSeg('factors')}
+      <section class="card"><h3>🚫 Ningún factor pasó la prueba</h3>
+        <p class="hint" style="margin-top:0">En ${F.universe} empresas, ningún indicador ordenó las acciones mejor que el azar de forma confiable en los años de prueba (${F.period.testFrom.slice(0, 4)} en adelante). Por honestidad, Pulso no muestra un ranking "para comprar".</p>
+        ${prom.length ? `<p class="hint">Prometedores, sin confirmar: ${prom.map((r) => `${esc(SHORT[r.id] || r.name)} (${r.hLabel})`).join(', ')}.</p>` : ''}
+        ${state.factorRank && !state.factorRank.validated ? `<p class="hint">🧪 Para juntar evidencia en vivo sin arriesgar dinero, el robot de la cuenta virtual está probando el candidato más prometedor: <b>${esc(state.factorRank.entry.name)}</b> (${state.factorRank.entry.hLabel}). Si en unos meses le gana al S&amp;P 500 ahí, será una pista real; si no, se descarta.</p>` : ''}
+        <div class="row-btns"><a class="btn" href="#/precision">Ver la investigación</a><a class="btn" href="#/cuenta">Ver la cuenta virtual</a></div></section>${disclaimer()}`;
+  }
+  const entry = currentEntry();
+  const fr = state.factorRank;
+  const T = entry.strat.test;
+  const chips = v.length > 1 ? `<div class="chips">${v.map((r) => `<button class="chip ${entryKey(r) === entryKey(entry) ? 'active' : ''}" data-fentry="${entryKey(r)}">${esc(SHORT[r.id] || r.id)} · ${r.hLabel}</button>`).join('')}</div>` : '';
+  const K = fr ? Math.max(3, Math.round(0.2 * fr.list.length)) : 0;
+  const rows = fr ? fr.list.map((x, i) => {
+    const a = state.analyses[x.sym];
+    const q = state.quotes[x.sym];
+    const sc = Math.round(x.score * 100);
+    return `<article class="row ranked" data-open="${esc(x.sym)}"><span class="rank">${i + 1}</span>${logo(x.sym)}
+      <div class="info"><b>${esc(meta(x.sym).n)}</b><small>${esc(x.sym)} · ${esc(sectorName(meta(x.sym).sec))}</small></div>
+      <div class="right">${pxEl(x.sym, q ? q.price : a && a.price)}${chgEl(x.sym, q ? q.changePct : 0)}</div>${ring(sc, { size: 46 })}
+      <div class="badges">${i < K ? '<span class="sig sbuy">TOP 20%</span>' : ''}<span class="chip-s">percentil ${sc}</span></div></article>`;
+  }).join('') : '<div class="skel" style="height:74px"></div>'.repeat(4);
+  return `${head}${rankSeg('factors')}${chips}
+    <section class="card glow">
+      <div class="eyebrow">Factor validado · mantener ${entry.hLabel}</div>
+      <h3 style="margin-top:6px">${esc(entry.name)}${entry.sign < 0 ? ' (al revés)' : ''}</h3>
+      <div class="prec-grid">
+        <div><b class="up">${fmtIC(entry.test.ic)}</b><span>IC en años de prueba (${fmtIC(entry.test.lo)} a ${fmtIC(entry.test.hi)})</span></div>
+        <div><b class="${T.excess.ann > 0 ? 'up' : 'down'}">${pctS(T.excess.ann)}</b><span>top 20% vs promedio por año, después de costos</span></div>
+        <div><b>${pp(T.port && T.port.cagr)}</b><span>al año vs ${pp(T.ew && T.ew.cagr)} promedio y ${pp(T.spy && T.spy.cagr)} S&amp;P 500</span></div>
+      </div>
+      <p class="hint">Probado en ${F.universe} empresas: dirección elegida con ${F.period.from.slice(0, 4)}–2021 y evaluado a ciegas en ${F.period.testFrom.slice(0, 4)}–${F.period.to.slice(0, 4)}. Aquí se aplica a tus ${fr ? fr.list.length : 0} empresas. Cómo usarlo: comprar en partes iguales el 20% de arriba y revisar cada ${entry.h === 5 ? 'semana' : 'mes'}.</p>
+    </section>
+    <div class="list">${rows}</div>
+    <p class="hint">Percentil 100 = la mejor clasificada de tus empresas según este factor. Un factor validado da una ventaja pequeña EN PROMEDIO entre muchas acciones; no garantiza que cada una suba.</p>
+    ${disclaimer()}`;
+}
+
+function paperCard() {
+  const P = state.paper;
+  if (!P) return '';
+  const cells = ['manual', 'factors', 'pulso', 'spy'].map((id) => {
+    const r = P.value(id, pxOf) / P.s.start - 1;
+    return `<div><b class="${r >= 0 ? 'up' : 'down'}">${pctS(r)}</b><span>${ACCOUNTS[id].icon} ${ACCOUNTS[id].name}</span></div>`;
+  }).join('');
+  return `<a class="card prec-card" href="#/cuenta"><div class="eyebrow">💼 Cuenta virtual · desde ${new Date(P.s.created).toLocaleDateString('es-MX')}</div>
+    <div class="acc-mini">${cells}</div><span class="muted small">Ver las cuentas →</span></a>`;
+}
+
+function viewCuenta() {
+  const P = state.paper;
+  if (!P) return '<div class="empty">Cargando…</div>';
+  const ids = ['manual', 'factors', 'pulso', 'spy'];
+  const colors = { manual: '#22d3ee', factors: '#00e396', pulso: '#ffc857', spy: '#a78bfa' };
+  const fr = state.factorRank;
+  const cards = ids.map((id) => {
+    const a = P.acc(id);
+    const v = P.value(id, pxOf);
+    const r = v / P.s.start - 1;
+    const pos = Object.entries(a.pos);
+    let status = '';
+    if (id === 'factors') {
+      status = fr
+        ? `${fr.validated ? 'Factor validado' : 'Probando candidato NO validado'}: ${SHORT[fr.entry.id] || fr.entry.name}. ${a.last ? `Próximo rebalanceo en ${Math.max(0, Math.ceil((a.last + 6.5 * 864e5 - Date.now()) / 864e5))} día(s).` : 'Primer rebalanceo al terminar el análisis.'}`
+        : 'En espera: no hay factor validado ni candidato, así que este robot no opera.';
+    }
+    if (id === 'pulso') status = `Sigue tus ${state.follow.length} empresas.`;
+    const posRows = pos.map(([sym, ps]) => {
+      const px = pxOf(sym) || ps.last;
+      const res = px / ps.avg - 1;
+      return `<tr><td><b>${esc(sym)}</b></td><td>${ps.qty.toFixed(ps.qty < 10 ? 3 : 1)}</td><td>${money(ps.avg)}</td><td>${money(ps.qty * px)}</td><td class="${res >= 0 ? 'up' : 'down'}">${pctS(res)}</td></tr>`;
+    }).join('');
+    const trRows = a.trades.slice(0, 12).map((t) => `<div class="tr-row"><span class="${t.side === 'buy' ? 'up' : 'down'}">${t.side === 'buy' ? 'COMPRA' : 'VENTA'}</span> <b>${esc(t.sym)}</b> ${t.qty.toFixed(t.qty < 10 ? 3 : 1)} a ${money(t.price)}${t.ret != null ? ` <span class="${t.ret >= 0 ? 'up' : 'down'}">${pctS(t.ret)}</span>` : ''}<small>${ago(t.t)} · ${esc(t.why || '')}</small></div>`).join('');
+    return `<article class="card acc" style="--ac:${colors[id]}">
+      <div class="acc-head"><span class="acc-ic">${ACCOUNTS[id].icon}</span><div><b>${ACCOUNTS[id].name}</b><small>${esc(ACCOUNTS[id].desc)}</small></div></div>
+      <div class="acc-val"><b>${money(v)}</b><span class="${r >= 0 ? 'up' : 'down'}">${pctS(r)}</span></div>
+      <div class="acc-sub">Efectivo ${money(a.cash)} · ${pos.length} posiciones · ${a.trades.length} operaciones${status ? ' · ' + esc(status) : ''}</div>
+      ${pos.length ? `<details><summary>Posiciones</summary><table class="bt-table"><thead><tr><th></th><th>Cantidad</th><th>Costo prom.</th><th>Valor</th><th>Resultado</th></tr></thead><tbody>${posRows}</tbody></table></details>` : ''}
+      ${a.trades.length ? `<details><summary>Últimas operaciones</summary>${trRows}</details>` : ''}
+    </article>`;
+  }).join('');
+  const series = ids.map((id) => ({ name: ACCOUNTS[id].name, color: colors[id], pts: P.acc(id).eq }));
+  const mcols = ids.map((id) => [ACCOUNTS[id].name, P.metrics(id)]);
+  const days = P.daily('spy').length;
+  return `<div class="page-head"><h2>💼 Cuenta virtual</h2><p>Dinero simulado con precios reales y costos (${(PAPER_COSTS.commission * 100).toFixed(2)}% de comisión + ${(PAPER_COSTS.slippage * 100).toFixed(2)}% de deslizamiento). Nunca se conecta a un bróker.</p></div>
+    <section class="card glow">
+      <h3>📈 Evolución desde ${new Date(P.s.created).toLocaleDateString('es-MX')}</h3>
+      ${equityChart(series)}
+      <div class="legend" style="flex-wrap:wrap">${ids.map((id) => `<span><i style="background:${colors[id]}"></i>${ACCOUNTS[id].name}</span>`).join('')}</div>
+      <p class="hint">La prueba honesta antes de usar dinero real: que una estrategia le gane aquí a la línea del S&amp;P 500 durante 3 a 6 meses. Se guarda un punto por hora mientras usas la app, y los robots solo actúan cuando la app está abierta.</p>
+    </section>
+    ${cards}
+    <section class="card">
+      <h3>📏 Métricas</h3>
+      ${days >= 20 ? metricsTable(mcols) : `<p class="hint" style="margin-top:0">Las métricas aparecen con al menos 20 días de registros (llevas ${days}).</p>`}
+    </section>
+    <section class="card">
+      <h3>⚙️ Reiniciar</h3>
+      <label class="field"><span>Capital inicial (simulado, USD)</span><input id="paper-start" type="number" inputmode="decimal" min="100" step="100" value="${P.s.start}"></label>
+      <button class="btn danger block" data-action="paper-reset">Reiniciar las 4 cuentas</button>
+    </section>
+    ${disclaimer()}`;
+}
+
+function openTradeModal(sym) {
+  const P = state.paper;
+  const price = pxOf(sym);
+  const a = P.acc('manual');
+  const ps = a.pos[sym];
+  openModal(`<div class="grab"></div>
+    <h3>💼 Operar ${esc(sym)} con dinero simulado</h3>
+    <p class="muted" style="margin:6px 0 0">Precio actual ${pxEl(sym, price)} · efectivo disponible ${money(a.cash)}</p>
+    ${ps ? `<p class="hint">Tienes ${ps.qty.toFixed(3)} acciones · costo promedio ${money(ps.avg)} · resultado ${pctS(price / ps.avg - 1)}</p>` : ''}
+    <label class="field"><span>Monto a comprar (USD simulados)</span><input id="paper-amt" type="number" inputmode="decimal" min="1" step="10" value="${Math.max(0, Math.min(1000, Math.floor(a.cash)))}"></label>
+    <div class="quick">${[250, 500, 1000, 2500].map((v) => `<button data-pamt="${v}">$${v.toLocaleString('en-US')}</button>`).join('')}</div>
+    <div class="row-btns">
+      <button class="btn primary" data-action="paper-buy" data-sym="${esc(sym)}" ${price > 0 ? '' : 'disabled'}>Comprar</button>
+      ${ps ? `<button class="btn danger" data-action="paper-sell" data-sym="${esc(sym)}">Vender todo</button>` : ''}
+    </div>
+    <p class="hint">Se cobra ${(PAPER_COSTS.commission * 100).toFixed(2)}% de comisión y ${(PAPER_COSTS.slippage * 100).toFixed(2)}% de deslizamiento por operación, como en la vida real. Tus resultados aparecen en Cuenta virtual.</p>`);
+}
+
+const VIEWS = { mercado: viewMercado, ranking: viewRanking, siguiendo: viewSiguiendo, noticias: viewNoticias, ajustes: viewAjustes, precision: viewPrecision, cuenta: viewCuenta };
 
 // ---------------------------------------------------------------------------
 // Renderizado
@@ -722,6 +1060,10 @@ function computeDeep(sym, { reason = 'scan', notifyChange = true } = {}) {
   d.at = Date.now();
   d.reason = reason;
   state.deep[sym] = d;
+  if (state.follow.includes(sym) && state.journal) {
+    state.journal.add({ sym, code: d.rec.code, label: d.rec.label, price: d.price });
+    if (state.paper && state.paper.onRecommendation(sym, d.rec.code, d.price, state.follow.length)) state.paper.snapshot(pxOf, true);
+  }
   const key = 'deepRecs:' + state.provider.mode;
   const recs = load(key, {});
   const prev = recs[sym];
@@ -877,6 +1219,10 @@ function initProvider() {
   if (state.provider) state.provider.disconnect();
   state.token++;
   state.provider = createProvider(state.settings);
+  state.paper = new PaperBook(state.provider.mode);
+  state.journal = new SignalJournal(state.provider.mode);
+  state.factorRank = null;
+  baseCache.clear();
   Object.assign(state, { analyses: {}, quotes: {}, hist: {}, profiles: {}, pulse: null, news: [], companyNews: {}, scanning: false, conn: 'off', deep: {}, raw: {} });
   state.provider.connect(liveSymbols(), onTick, (s) => {
     state.conn = s;
@@ -969,6 +1315,7 @@ async function runScan({ manual = false } = {}) {
   if (state.detail) renderDetailBody();
   finishScanFx();
   emitSignalNotifications();
+  afterScanPhase1();
 }
 
 function emitSignalNotifications() {
@@ -1122,6 +1469,7 @@ async function openDetail(sym) {
         <button class="btn primary" data-action="alert" data-sym="${esc(sym)}">🔔 Alerta de precio</button>
         <button class="btn" data-action="follow" data-sym="${esc(sym)}">${followed ? '★ Siguiendo' : '☆ Seguir'}</button>
       </div>
+      <button class="btn block" style="margin-bottom:12px" data-action="paper-open" data-sym="${esc(sym)}">💼 Comprar o vender con dinero simulado</button>
       <div id="d-body"></div>
     </div>`;
   $('#sheet').classList.add('open');
@@ -1300,12 +1648,15 @@ function closeDetail() {
 // ---------------------------------------------------------------------------
 // Editor de alertas
 // ---------------------------------------------------------------------------
+let modalRaf = 0;
 function openModal(html) {
   const m = $('#modal');
   m.innerHTML = `<div class="modal-card">${html}</div>`;
-  requestAnimationFrame(() => m.classList.add('open'));
+  cancelAnimationFrame(modalRaf);
+  modalRaf = requestAnimationFrame(() => m.classList.add('open'));
 }
 function closeModal() {
+  cancelAnimationFrame(modalRaf); // por si se cierra antes de terminar de abrir
   $('#modal').classList.remove('open');
 }
 
@@ -1585,6 +1936,37 @@ async function handleAction(action, el) {
     case 'add-follow': addFollow(sym, el.dataset.name); break;
     case 'bt-run': runUserBacktest(); break;
     case 'bt-stop': state.bt.stop = true; break;
+    case 'paper-open': openTradeModal(sym); break;
+    case 'paper-buy': {
+      const amt = parseFloat($('#paper-amt') && $('#paper-amt').value);
+      const tr = state.paper.buy('manual', sym, amt, pxOf(sym), 'Decisión propia');
+      closeModal();
+      if (tr) {
+        state.paper.snapshot(pxOf, true);
+        toast({ title: `💼 Compraste ${sym} (simulado)`, body: `${tr.qty.toFixed(3)} acciones a ${money(tr.price)}`, kind: 'info' });
+      } else toast({ title: 'No se pudo comprar', body: 'Revisa el monto, el efectivo disponible o que haya precio.', kind: 'info' });
+      if (state.tab === 'cuenta') renderView();
+      break;
+    }
+    case 'paper-sell': {
+      const tr = state.paper.sell('manual', sym, null, pxOf(sym), 'Decisión propia');
+      closeModal();
+      if (tr) {
+        state.paper.snapshot(pxOf, true);
+        toast({ title: `💼 Vendiste ${sym} (simulado)`, body: `Resultado de la operación: ${pctS(tr.ret)}`, kind: 'info' });
+      }
+      if (state.tab === 'cuenta') renderView();
+      break;
+    }
+    case 'paper-reset': {
+      const v = parseFloat($('#paper-start') && $('#paper-start').value) || 10000;
+      if (confirm('¿Reiniciar las 4 cuentas virtuales? Se borran posiciones e historial simulado.')) {
+        state.paper.reset(Math.max(100, v));
+        afterScanPhase1();
+        renderView();
+      }
+      break;
+    }
     case 'deep-recalc': {
       const d = computeDeep(sym, { reason: 'manual', notifyChange: false });
       renderDetailBody();
@@ -1668,6 +2050,20 @@ function bindEvents() {
       state.rankFilter = fl.dataset.filter;
       if (state.tab !== 'ranking') location.hash = '#/ranking';
       else renderView();
+      return;
+    }
+    const fe = e.target.closest('[data-fentry]');
+    if (fe) {
+      state.factorEntry = fe.dataset.fentry;
+      save('factorEntry', state.factorEntry);
+      computeFactorRanking();
+      renderView();
+      return;
+    }
+    const pa = e.target.closest('[data-pamt]');
+    if (pa) {
+      const inp = $('#paper-amt');
+      if (inp) inp.value = pa.dataset.pamt;
       return;
     }
     const bts = e.target.closest('[data-bt]');

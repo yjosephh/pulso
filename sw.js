@@ -1,5 +1,5 @@
 /* Service worker de Pulso: caché del "cascarón" de la app y notificaciones. */
-const CACHE = 'pulso-v3';
+const CACHE = 'pulso-v4';
 const SHELL = [
   './',
   './index.html',
@@ -12,6 +12,10 @@ const SHELL = [
   './js/universe.js',
   './js/store.js',
   './js/backtest.js',
+  './js/metrics.js',
+  './js/factors.js',
+  './js/paper.js',
+  './data/factors-ref.json',
   './data/backtest-ref.json',
   './manifest.webmanifest',
   './icons/icon-192.png',
@@ -23,26 +27,34 @@ const SHELL = [
 // blanco al actualizar): se activa la próxima vez que se abre Pulso. Como las
 // peticiones van "red primero", igual se reciben los archivos nuevos al instante.
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).catch(() => {}));
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })))).catch(() => {}));
 });
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))));
 });
 
+// Solo intervenimos en los archivos propios de la app (y la página); todo lo
+// demás (APIs de mercado, otros archivos) va directo a la red sin pasar por aquí.
+const SHELL_PATHS = new Set(SHELL.map((p) => new URL(p, self.location).pathname));
+
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
-  // Las APIs de mercado siempre van a la red (datos en vivo, nunca en caché).
   if (url.origin !== self.location.origin || e.request.method !== 'GET') return;
-  // Red primero para tener siempre la última versión; caché si no hay conexión.
+  const isPage = e.request.mode === 'navigate';
+  if (!isPage && !SHELL_PATHS.has(url.pathname)) return;
+  // Red primero, revalidando siempre con el servidor (cache: 'no-cache') para no
+  // mezclar archivos nuevos con viejos tras una actualización; caché si no hay red.
   e.respondWith(
-    fetch(e.request)
+    fetch(url.href, { cache: 'no-cache', credentials: 'same-origin' })
       .then((res) => {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, copy));
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(isPage ? './index.html' : e.request, copy)).catch(() => {});
+        }
         return res;
       })
-      .catch(() => caches.match(e.request).then((r) => r || caches.match('./index.html')))
+      .catch(() => caches.match(isPage ? './index.html' : e.request).then((r) => r || caches.match('./index.html')))
   );
 });
 
