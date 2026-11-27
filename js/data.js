@@ -138,19 +138,32 @@ export class DemoProvider {
     return META[sym] || { s: sym, n: sym, base: 100, vol: 0.3, drift: 0.08, sec: 'tech' };
   }
 
+  // Choques diarios comunes del mercado simulado (mismos para todas las empresas).
+  market(n) {
+    if (!this.mkt || this.mkt.length !== n) {
+      const r = mulberry32(hashStr('MKT'));
+      this.mkt = Array.from({ length: n }, () => gaussFrom(r));
+    }
+    return this.mkt;
+  }
+
   async getHistory(sym) {
     if (this.hist[sym]) return this.hist[sym];
     const m = this.meta(sym);
     const rng = mulberry32(hashStr(sym));
     const dates = lastTradingDays(420);
     const sd = m.vol / Math.sqrt(252);
+    // Parte del movimiento viene del "mercado" (común a todas): correlación realista entre empresas.
+    const mkt = this.market(dates.length);
+    const rho = INDICES.some((x) => x.s === sym) ? 0.95 : 0.55;
+    const idio = Math.sqrt(1 - rho * rho);
     let p = 1;
     let regime = m.drift;
     const raw = [];
     for (let i = 0; i < dates.length; i++) {
       if (i % 60 === 0) regime = m.drift + gaussFrom(rng) * m.vol * 0.9;
       const open = p * (1 + gaussFrom(rng) * sd * 0.25);
-      const close = open * Math.exp((regime - 0.5 * m.vol * m.vol) / 252 + gaussFrom(rng) * sd);
+      const close = open * Math.exp((regime - 0.5 * m.vol * m.vol) / 252 + (rho * mkt[i] + idio * gaussFrom(rng)) * sd);
       const high = Math.max(open, close) * (1 + Math.abs(gaussFrom(rng)) * sd * 0.45);
       const low = Math.min(open, close) * (1 - Math.abs(gaussFrom(rng)) * sd * 0.45);
       const volume = Math.round((2e7 + rng() * 6e7) * (1 + Math.abs(gaussFrom(rng)) * 0.6));
@@ -232,6 +245,25 @@ export class DemoProvider {
     const strongSell = Math.round(sell * 0.3);
     const hold = Math.max(0, total - buyish - sell - strongSell);
     return { strongBuy, buy, hold, sell, strongSell, period: isoDate() };
+  }
+
+  // Calendario de resultados simulado: fechas trimestrales fijas por empresa.
+  async getEarnings(sym) {
+    const rng = mulberry32(hashStr('e' + sym));
+    const phase = Math.floor(rng() * 91);
+    const day0 = Math.floor(Date.UTC(2024, 0, 1) / DAY);
+    const today = Math.floor(Date.now() / DAY);
+    let next = day0 + phase + 91 * Math.ceil((today - day0 - phase) / 91);
+    const wd = new Date(next * DAY).getUTCDay();
+    if (wd === 6) next += 2;
+    else if (wd === 0) next += 1;
+    const last = [];
+    for (let k = 1; k <= 4; k++) {
+      const estimate = 1 + rng() * 2;
+      const surprisePercent = gaussFrom(rng) * 6 + 3; // la mayoría supera la estimación
+      last.push({ period: isoDate(new Date((next - 91 * k) * DAY)), estimate, actual: estimate * (1 + surprisePercent / 100), surprisePercent });
+    }
+    return { next: { date: isoDate(new Date(next * DAY)), hour: rng() < 0.5 ? 'bmo' : 'amc' }, last, demo: true };
   }
 
   async getMarketNews() {
@@ -501,6 +533,31 @@ export class LiveProvider {
     const r = await this.fh('/stock/recommendation', { symbol: sym });
     const out = Array.isArray(r) && r.length ? r[0] : null;
     cacheSet(ck, out);
+    return out;
+  }
+
+  // Próximos resultados (calendario de Finnhub) y sorpresas de los últimos 4 trimestres.
+  async getEarnings(sym) {
+    if (sym.endsWith('.KS')) return null;
+    const ck = 'e:' + sym;
+    const hit = cacheGet(ck, 12 * HOUR);
+    if (hit) return hit;
+    const from = isoDate();
+    const to = isoDate(new Date(Date.now() + 120 * DAY));
+    let next = null;
+    let last = [];
+    let err = null;
+    try {
+      const r = await this.fh('/calendar/earnings', { from, to, symbol: sym });
+      const list = ((r && r.earningsCalendar) || []).filter((e) => e.date >= from).sort((a, b) => (a.date < b.date ? -1 : 1));
+      if (list[0]) next = { date: list[0].date, hour: list[0].hour || '', epsEstimate: list[0].epsEstimate, revenueEstimate: list[0].revenueEstimate };
+    } catch (e) { err = e.message; }
+    try {
+      const s = await this.fh('/stock/earnings', { symbol: sym });
+      last = (Array.isArray(s) ? s : []).slice(0, 4).map((e) => ({ period: e.period, actual: e.actual, estimate: e.estimate, surprisePercent: e.surprisePercent }));
+    } catch (e) { err = err || e.message; }
+    const out = { next, last, err };
+    if (!err) cacheSet(ck, out);
     return out;
   }
 

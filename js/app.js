@@ -1,8 +1,8 @@
 // PULSO · aplicación principal
 import { UNIVERSE, INDICES, SECTORS, sectorName } from './universe.js';
 import { createProvider, LiveProvider, isoDate, hashStr } from './data.js';
-import { analyze, marketPulse, simulate, sma, sentiment, deepAnalysis } from './analysis.js';
-import { sparkline, gauge, ring, fanChart, priceChart, equityChart } from './charts.js';
+import { analyze, marketPulse, simulate, sma, sentiment, deepAnalysis, newsImpact } from './analysis.js';
+import { sparkline, gauge, ring, fanChart, priceChart, equityChart, planChart } from './charts.js';
 import {
   notify, Alerts, configureNotify, unlockAudio, notifPermission, notifSupported,
   requestNotifPermission, getHistory, unreadCount, markAllRead, clearHistory,
@@ -11,6 +11,10 @@ import { load, save, clearCache, clearAll } from './store.js';
 import { runBacktest, HIT, baseRates } from './backtest.js';
 import { factorStudy, liveFactorRanking, FACTOR_NAME, HORIZONS } from './factors.js';
 import { PaperBook, SignalJournal, ACCOUNTS, PAPER_COSTS } from './paper.js';
+import { RISK_DEFAULTS, stopFor, sizePosition, drawdownOf, exposure } from './risk.js';
+import { METHODS, alignReturns, buildWeights, ledoitWolf, portfolioRisk, avgCorrelation, discreteAllocation } from './portfolio.js';
+import { PLAN_PRESETS, INFLATION, makeShocks, runPlan, solveMonthly } from './plan.js';
+import { ThesisBook, CHECKS, STATUS, evalThesis } from './thesis.js';
 
 // ---------------------------------------------------------------------------
 // Utilidades
@@ -42,7 +46,7 @@ function ago(ts) {
 // Estado
 // ---------------------------------------------------------------------------
 const DEFAULTS = { mode: 'demo', finnhubKey: '', tdKey: '', scanEvery: 15, notifySignals: true, sound: true };
-const TABS = ['mercado', 'ranking', 'siguiendo', 'noticias', 'ajustes', 'precision', 'cuenta'];
+const TABS = ['mercado', 'ranking', 'siguiendo', 'noticias', 'ajustes', 'precision', 'cuenta', 'cartera'];
 
 const state = {
   settings: { ...DEFAULTS, ...load('settings', {}) },
@@ -84,6 +88,16 @@ const state = {
   factorEntry: load('factorEntry', null),
   paper: null,
   journal: null,
+  risk: { ...RISK_DEFAULTS, ...load('risk', {}) },
+  thesis: null,
+  earnings: {},
+  pf: { ref: null },
+  carteraTab: load('carteraTab', 'riesgo'),
+  builder: { amount: 10000, universe: 'follow', method: 'ew', fractional: true, ...load('builder', {}) },
+  built: null,
+  planIn: { initial: 1000, monthly: 200, years: 10, preset: 'prudente', ret: 0.07, vol: 0.16, goal: 0, real: false, ...load('plan', {}) },
+  planShocks: null,
+  thType: 'largo',
 };
 configureNotify({ sound: state.settings.sound });
 
@@ -174,6 +188,7 @@ function viewMercado() {
     </section>
     ${precisionCard()}
     ${paperCard()}
+    ${carteraCard()}
     <section>
       <div class="sec-title"><h3>Índices</h3><span class="muted">${esc(state.status ? state.status.label : '')}</span></div>
       <div class="idx-grid">${idx}</div>
@@ -259,6 +274,10 @@ function viewSiguiendo() {
         prob = `<p class="hint">🎲 Probabilidad estimada de tocar ${lv.length > 1 ? 'tus precios' : 'tu precio'} en 1 mes: <b>${lv.map((l, i) => `${money(l, curOf(sym))} → ${Math.round(mc.levelProb[i] * 100)}%`).join(' · ')}</b></p>`;
       }
     }
+    const tev = thesisEval(sym);
+    const ern = state.earnings[sym];
+    const ed = ern && ern.next ? daysTo(ern.next.date) : null;
+    const wchips = `${tev ? `<span class="th-chip ${STATUS[tev.status].tone}">${STATUS[tev.status].emoji} ${STATUS[tev.status].label}</span>` : ''}${ed != null && ed >= 0 && ed <= 14 ? `<span class="th-chip warn">📅 Resultados ${ed === 0 ? 'hoy' : `en ${ed} d`}</span>` : ''}`;
     return `<article class="card watch" data-open="${esc(sym)}">
       <div class="w-head">${logo(sym, 44)}<div class="info"><b>${esc(meta(sym).n)}</b><small>${esc(sym)}</small></div>
         <div class="right">${pxEl(sym, price)}${chgEl(sym, q ? q.changePct : a ? a.changePct : 0)}</div></div>
@@ -268,6 +287,7 @@ function viewSiguiendo() {
         <button class="btn sm primary" data-action="alert" data-sym="${esc(sym)}">🔔 Alerta</button>
         <button class="btn sm ghost" data-action="unfollow" data-sym="${esc(sym)}" aria-label="Dejar de seguir">✕</button></div>
       ${state.deep[sym] ? deepMini(sym) : a && !a.error ? `<div class="w-verdict tone-${a.verdict.tone}">${a.verdict.emoji} <b>${esc(a.verdict.title)}</b> · Horizonte: ${esc(a.verdict.horizon)} · ${sigBadge(a)}</div>` : ''}
+      ${wchips ? `<div class="w-chips">${wchips}</div>` : ''}
       ${prob}
     </article>`;
   }).join('');
@@ -276,6 +296,7 @@ function viewSiguiendo() {
   return `
     <div class="page-head"><h2>En seguimiento</h2><p>Noticias en vivo · 10,000 escenarios por empresa · alertas instantáneas</p></div>
     <a class="card prec-link" href="#/cuenta"><b>💼 Cuenta virtual</b><span class="muted small">Prueba con dinero simulado: tus operaciones, los robots y el S&amp;P 500 →</span></a>
+    ${carteraCard()}
     <div class="card search">
       <input id="search" type="search" placeholder="🔍 Buscar empresa para seguir (ej. Tesla, KO)" autocomplete="off" enterkeyhint="search">
       <div id="search-res" class="search-res"></div>
@@ -287,6 +308,7 @@ function viewSiguiendo() {
       </div>
     </div>
     ${notifPermission() !== 'granted' ? `<div class="banner warn" style="margin-top:12px"><span>🔕 Activa las notificaciones para recibir las alertas aunque estés en otra app.</span><a href="#" data-action="enable-notif">Activar</a></div>` : ''}
+    ${earningsList()}
     ${cards || `<div class="empty"><div class="big">⭐</div>Aún no sigues ninguna empresa.<br>Abre cualquier empresa y toca <b>★</b> para seguirla y poner alertas de precio.</div>`}
     ${disclaimer()}`;
 }
@@ -362,6 +384,7 @@ function viewAjustes() {
       <p class="hint">Las alertas de precio se revisan en cada movimiento del precio y suenan al instante mientras Pulso esté abierta (o en segundo plano reciente). En iPhone, primero instala la app en la pantalla de inicio para poder recibir notificaciones.</p>
     </section>
     <a class="card prec-link" href="#/precision"><b>📏 Precisión medida</b><span class="muted small">Ver qué tan seguido aciertan las reglas en 11 años de datos reales →</span></a>
+    ${carteraCard()}
     <details class="card">
       <summary>🧠 ¿Cómo analiza Pulso?</summary>
       <div class="hint" style="margin:0">
@@ -411,9 +434,13 @@ async function loadBtRef() {
     state.fs.ref = j && j.big;
     state.fs.refApp = j && j.app;
   } catch { /* sin estudio de factores */ }
+  try {
+    const r3 = await fetch('data/portfolio-ref.json', { cache: 'no-cache' });
+    state.pf.ref = r3.ok ? await r3.json() : null;
+  } catch { /* sin validación de portafolio y stops */ }
   state.bt.refLoading = false;
   if (!state.scanning && analysesList().length) afterScanPhase1();
-  if (['precision', 'mercado', 'ranking', 'cuenta'].includes(state.tab)) scheduleRender();
+  if (['precision', 'mercado', 'ranking', 'cuenta', 'cartera'].includes(state.tab)) scheduleRender();
   if (state.detail) renderDetailBody();
 }
 
@@ -557,6 +584,8 @@ function viewPrecision() {
     ${factorSection(state.fs.ref, 'Factores: ¿alguno predice qué acciones lo harán mejor que las demás?')}
     ${factorSection(state.fs.refApp, 'Réplica con las empresas de Pulso')}
     ${state.fs.user ? factorSection(state.fs.user, 'Factores con tus datos') : ''}
+    ${optEvidence()}
+    ${stopsEvidence()}
     ${journalSection()}
     <section class="card">
       <h3>⚠️ Lo que esta prueba NO mide</h3>
@@ -856,7 +885,7 @@ function viewFactorRank() {
 function paperCard() {
   const P = state.paper;
   if (!P) return '';
-  const cells = ['manual', 'factors', 'pulso', 'spy'].map((id) => {
+  const cells = ['manual', 'factors', 'pulso', 'cartera', 'spy'].map((id) => {
     const r = P.value(id, pxOf) / P.s.start - 1;
     return `<div><b class="${r >= 0 ? 'up' : 'down'}">${pctS(r)}</b><span>${ACCOUNTS[id].icon} ${ACCOUNTS[id].name}</span></div>`;
   }).join('');
@@ -867,8 +896,8 @@ function paperCard() {
 function viewCuenta() {
   const P = state.paper;
   if (!P) return '<div class="empty">Cargando…</div>';
-  const ids = ['manual', 'factors', 'pulso', 'spy'];
-  const colors = { manual: '#22d3ee', factors: '#00e396', pulso: '#ffc857', spy: '#a78bfa' };
+  const ids = ['manual', 'factors', 'pulso', 'cartera', 'spy'];
+  const colors = { manual: '#22d3ee', factors: '#00e396', pulso: '#ffc857', cartera: '#ec4899', spy: '#a78bfa' };
   const fr = state.factorRank;
   const cards = ids.map((id) => {
     const a = P.acc(id);
@@ -882,6 +911,11 @@ function viewCuenta() {
         : 'En espera: no hay factor validado ni candidato, así que este robot no opera.';
     }
     if (id === 'pulso') status = `Sigue tus ${state.follow.length} empresas.`;
+    if (id === 'cartera') {
+      status = a.target
+        ? `${METHODS[a.target.method].name} · ${a.target.universe === 'pulso' ? 'empresas de Pulso' : 'las que sigues'} · próximo rebalanceo en ${Math.max(0, Math.ceil((a.last + 30 * 864e5 - Date.now()) / 864e5))} día(s).`
+        : 'Sin portafolio todavía: ármalo en Cartera → Portafolio.';
+    }
     const posRows = pos.map(([sym, ps]) => {
       const px = pxOf(sym) || ps.last;
       const res = px / ps.avg - 1;
@@ -891,7 +925,7 @@ function viewCuenta() {
     return `<article class="card acc" style="--ac:${colors[id]}">
       <div class="acc-head"><span class="acc-ic">${ACCOUNTS[id].icon}</span><div><b>${ACCOUNTS[id].name}</b><small>${esc(ACCOUNTS[id].desc)}</small></div></div>
       <div class="acc-val"><b>${money(v)}</b><span class="${r >= 0 ? 'up' : 'down'}">${pctS(r)}</span></div>
-      <div class="acc-sub">Efectivo ${money(a.cash)} · ${pos.length} posiciones · ${a.trades.length} operaciones${status ? ' · ' + esc(status) : ''}</div>
+      <div class="acc-sub">Efectivo ${money(a.cash)} · ${pos.length} ${pos.length === 1 ? 'posición' : 'posiciones'} · ${a.trades.length} ${a.trades.length === 1 ? 'operación' : 'operaciones'}${status ? ' · ' + esc(status) : ''}</div>
       ${pos.length ? `<details><summary>Posiciones</summary><table class="bt-table"><thead><tr><th></th><th>Cantidad</th><th>Costo prom.</th><th>Valor</th><th>Resultado</th></tr></thead><tbody>${posRows}</tbody></table></details>` : ''}
       ${a.trades.length ? `<details><summary>Últimas operaciones</summary>${trRows}</details>` : ''}
     </article>`;
@@ -914,22 +948,43 @@ function viewCuenta() {
     <section class="card">
       <h3>⚙️ Reiniciar</h3>
       <label class="field"><span>Capital inicial (simulado, USD)</span><input id="paper-start" type="number" inputmode="decimal" min="100" step="100" value="${P.s.start}"></label>
-      <button class="btn danger block" data-action="paper-reset">Reiniciar las 4 cuentas</button>
+      <button class="btn danger block" data-action="paper-reset">Reiniciar las 5 cuentas</button>
     </section>
     ${disclaimer()}`;
 }
 
-function openTradeModal(sym) {
+function openTradeModal(sym, amt = null) {
   const P = state.paper;
   const price = pxOf(sym);
+  if (!usd(sym)) {
+    openModal(`<div class="grab"></div><h3>💼 ${esc(sym)}</h3>
+      <p class="hint">Por ahora la cuenta virtual solo opera acciones en dólares; ${esc(meta(sym).n)} cotiza en ${esc(curOf(sym))}.</p>
+      <div class="row-btns"><button class="btn" data-action="close-modal">Cerrar</button></div>`);
+    return;
+  }
   const a = P.acc('manual');
   const ps = a.pos[sym];
+  const R = riskPlan(sym);
+  const sug = R && R.size && R.size.amount >= 1 ? Math.floor(R.size.amount) : null;
+  const val = amt != null && amt > 0 ? Math.floor(amt) : sug != null ? sug : Math.max(0, Math.min(1000, Math.floor(a.cash)));
+  const k = killState();
+  const th = state.thesis && state.thesis.get(sym);
+  const ev = th ? thesisEval(sym) : null;
+  const quick = [...new Set([...(sug ? [sug] : []), 250, 500, 1000])];
   openModal(`<div class="grab"></div>
     <h3>💼 Operar ${esc(sym)} con dinero simulado</h3>
     <p class="muted" style="margin:6px 0 0">Precio actual ${pxEl(sym, price)} · efectivo disponible ${money(a.cash)}</p>
     ${ps ? `<p class="hint">Tienes ${ps.qty.toFixed(3)} acciones · costo promedio ${money(ps.avg)} · resultado ${pctS(price / ps.avg - 1)}</p>` : ''}
-    <label class="field"><span>Monto a comprar (USD simulados)</span><input id="paper-amt" type="number" inputmode="decimal" min="1" step="10" value="${Math.max(0, Math.min(1000, Math.floor(a.cash)))}"></label>
-    <div class="quick">${[250, 500, 1000, 2500].map((v) => `<button data-pamt="${v}">$${v.toLocaleString('en-US')}</button>`).join('')}</div>
+    ${k.active ? `<div class="concl-line tone-bad">🛑 Freno de emergencia activo: tu cuenta cayó ${pctS(k.dd)} desde su máximo. Tu regla dice pausar compras nuevas.</div>` : ''}
+    <label class="field"><span>Monto a comprar (USD simulados)</span><input id="paper-amt" type="number" inputmode="decimal" min="1" step="10" value="${val}"></label>
+    <div class="quick">${quick.map((v) => `<button data-pamt="${v}">${v === sug ? '🎯 ' : ''}$${v.toLocaleString('en-US')}</button>`).join('')}</div>
+    ${R && R.size ? `<p class="hint">🎯 Tamaño sugerido por tu perfil de riesgo: ${money(R.size.amount)}, con stop de cierre en ${money(R.st.stop)} (${pctS(-R.st.dist)}).</p>` : ''}
+    ${th
+      ? `<p class="hint">📝 Tu tesis: ${STATUS[ev.status].emoji} ${STATUS[ev.status].label}${th.stop ? ` · stop ${money(th.stop)}` : ''}</p>`
+      : `<label class="field"><span>¿Por qué la compras? (opcional: se guarda como tu tesis${R ? ` con el stop sugerido de ${money(R.st.stop)}` : ''})</span><textarea id="paper-why" rows="2" maxlength="600" placeholder="Ej. La quiero para 5 años por su crecimiento."></textarea></label>
+         <input id="paper-stop" type="hidden" value="${R ? R.st.stop.toFixed(2) : ''}">`}
+    ${k.active ? '<label class="kill-ok"><input type="checkbox" id="kill-ok"> Entiendo el riesgo y quiero comprar de todos modos</label>' : ''}
+    <div class="err-msg" id="paper-err"></div>
     <div class="row-btns">
       <button class="btn primary" data-action="paper-buy" data-sym="${esc(sym)}" ${price > 0 ? '' : 'disabled'}>Comprar</button>
       ${ps ? `<button class="btn danger" data-action="paper-sell" data-sym="${esc(sym)}">Vender todo</button>` : ''}
@@ -937,7 +992,678 @@ function openTradeModal(sym) {
     <p class="hint">Se cobra ${(PAPER_COSTS.commission * 100).toFixed(2)}% de comisión y ${(PAPER_COSTS.slippage * 100).toFixed(2)}% de deslizamiento por operación, como en la vida real. Tus resultados aparecen en Cuenta virtual.</p>`);
 }
 
-const VIEWS = { mercado: viewMercado, ranking: viewRanking, siguiendo: viewSiguiendo, noticias: viewNoticias, ajustes: viewAjustes, precision: viewPrecision, cuenta: viewCuenta };
+// ---------------------------------------------------------------------------
+// Fase 2: riesgo, portafolio, plan de aportes, tesis y calendario de resultados
+// ---------------------------------------------------------------------------
+const lastOf = (arr) => arr[arr.length - 1];
+const saveRisk = () => save('risk', state.risk);
+const usd = (sym) => (meta(sym).cur || '$') === '$';
+const secLabel = (id) => {
+  const s = SECTORS.find((x) => x.id === id);
+  return s ? `${s.icon} ${s.name}` : '➕ Otras';
+};
+const sbar = (label, pct, limit) => `<div class="sbar"><span>${esc(label)}</span><div class="sbar-track"><i class="${pct > limit + 1e-9 ? 'over' : ''}" style="width:${Math.min(100, Math.max(0, pct * 100)).toFixed(1)}%"></i><em style="left:${Math.min(100, limit * 100)}%"></em></div><b>${pp(pct, 0)}</b></div>`;
+const fmtDate = (d, opts = { day: 'numeric', month: 'short', year: 'numeric' }) => new Date(d + 'T12:00:00Z').toLocaleDateString('es-MX', { ...opts, timeZone: 'UTC' });
+
+function manualAcc() {
+  return state.paper ? state.paper.acc('manual') : null;
+}
+function capitalBase() {
+  if (state.risk.capital > 0) return state.risk.capital;
+  return state.paper ? state.paper.value('manual', pxOf) : 10000;
+}
+function heldValue(sym) {
+  const a = manualAcc();
+  const p = a && a.pos[sym];
+  if (!p) return 0;
+  const px = pxOf(sym);
+  return p.qty * (px > 0 ? px : p.last || p.avg);
+}
+function sectorValue(sec) {
+  const a = manualAcc();
+  if (!a) return 0;
+  return Object.keys(a.pos).filter((s) => meta(s).sec === sec).reduce((t, s) => t + heldValue(s), 0);
+}
+function daysTo(date) {
+  if (!date) return null;
+  return Math.ceil((Date.parse(date + 'T12:00:00Z') - Date.now()) / 864e5);
+}
+
+// Frecuencia REAL (10 años, 104 empresas) de que algún cierre tocara un stop así en 1 mes,
+// según la volatilidad de la acción. La fórmula sola la subestima.
+function stopCalib(sigma) {
+  const c = state.pf.ref && state.pf.ref.stops && state.pf.ref.stops.big && state.pf.ref.stops.big.calib;
+  if (!c || !Number.isFinite(sigma)) return null;
+  const [q1, q2] = c.volCuts;
+  const b = sigma <= q1 ? c.low : sigma <= q2 ? c.mid : c.high;
+  return { real: b.real, pred: b.pred, n: b.n, label: sigma <= q1 ? 'tranquilas' : sigma <= q2 ? 'de volatilidad media' : 'volátiles' };
+}
+
+function riskPlan(sym) {
+  const a = state.analyses[sym];
+  if (!a || a.error || !usd(sym)) return null;
+  const st = stopFor(a, state.risk.stopDays);
+  if (!st) return null;
+  const capital = capitalBase();
+  const acc = manualAcc();
+  const e = state.earnings[sym];
+  const earnDays = e && e.next ? daysTo(e.next.date) : null;
+  const earningsSoon = earnDays != null && earnDays >= 0 && earnDays <= 30;
+  const size = sizePosition({ price: a.price, stop: st.stop, capital, cash: acc ? acc.cash : capital, held: heldValue(sym), sectorValue: sectorValue(a.sec), profile: state.risk, earningsSoon });
+  return { a, st, size, capital, earnDays, earningsSoon, calib: stopCalib(st.sigma) };
+}
+
+// Freno de emergencia: la cuenta "Mis operaciones" cayó más que tu límite desde su máximo.
+function killState() {
+  const a = manualAcc();
+  if (!a) return { active: false, dd: 0, limit: state.risk.killDD };
+  const d = drawdownOf(a.eq);
+  return { ...d, active: d.dd <= -state.risk.killDD, limit: state.risk.killDD };
+}
+function checkKill() {
+  if (!state.provider) return;
+  const k = killState();
+  const key = 'kill:' + state.provider.mode;
+  const was = load(key, false);
+  if (k.active && !was) {
+    save(key, true);
+    notify({ title: '🛑 Freno de emergencia activado', body: `Tu cuenta virtual cayó ${pctS(k.dd)} desde su máximo (tu límite: −${Math.round(k.limit * 100)}%). Pausa las compras nuevas y revisa tus tesis antes de seguir.`, kind: 'alert-down' });
+  } else if (!k.active && was) save(key, false);
+}
+
+// --- Calendario de resultados (cola para respetar los límites de la API) ---
+const earnQueue = new Set();
+let earnRunning = false;
+function queueEarnings(syms) {
+  syms.forEach((s) => earnQueue.add(s));
+  if (!earnRunning) runEarnings();
+}
+async function runEarnings() {
+  earnRunning = true;
+  const token = state.token;
+  try {
+    while (earnQueue.size) {
+      const sym = earnQueue.values().next().value;
+      earnQueue.delete(sym);
+      const prov = state.provider;
+      if (!prov || !prov.getEarnings || !usd(sym)) continue;
+      const cur = state.earnings[sym];
+      if (cur && Date.now() - cur.at < 6 * 3600e3) continue;
+      let e = null;
+      try { e = await prov.getEarnings(sym); } catch { e = null; }
+      if (token !== state.token) {
+        earnQueue.clear();
+        return;
+      }
+      state.earnings[sym] = { ...(e || { next: null, last: [] }), at: Date.now() };
+      if (state.detail === sym) renderDetailBody();
+    }
+  } finally {
+    earnRunning = false;
+    if (token === state.token) {
+      earningsNotices();
+      checkTheses();
+      if (['siguiendo', 'cartera'].includes(state.tab)) scheduleRender();
+    }
+  }
+}
+function earningsNotices() {
+  if (!state.settings.notifySignals) return;
+  const sent = load('earnSent', {});
+  const held = Object.keys((manualAcc() || { pos: {} }).pos);
+  for (const sym of new Set([...state.follow, ...held])) {
+    const e = state.earnings[sym];
+    const d = e && e.next ? daysTo(e.next.date) : null;
+    if (d == null || d < 0 || d > 3) continue;
+    const k = sym + '|' + e.next.date;
+    if (sent[k]) continue;
+    sent[k] = Date.now();
+    notify({
+      title: `📅 ${sym} presenta resultados ${d === 0 ? 'hoy' : d === 1 ? 'mañana' : `en ${d} días`}`,
+      body: `${meta(sym).n}${e.next.hour === 'bmo' ? ' (antes de que abra la bolsa)' : e.next.hour === 'amc' ? ' (después del cierre)' : ''}. Los resultados suelen mover el precio más que un día normal: revisa tu tesis y el tamaño de tu posición.`,
+      kind: 'info',
+      sym,
+    });
+  }
+  for (const k of Object.keys(sent)) if (Date.now() - sent[k] > 30 * 864e5) delete sent[k];
+  save('earnSent', sent);
+}
+
+// --- Tesis ---
+function thesisCtx(sym) {
+  const a = state.analyses[sym];
+  const price = pxOf(sym) || (a && !a.error ? a.price : NaN);
+  return { price, a: a && !a.error ? a : null, earnings: state.earnings[sym], newsImp: newsImpact(state.companyNews[sym]), fmt: (v) => money(v, curOf(sym)) };
+}
+function thesisEval(sym) {
+  const th = state.thesis && state.thesis.get(sym);
+  return th ? evalThesis(th, thesisCtx(sym)) : null;
+}
+const TH_LVL = { intacta: 0, revisar: 1, rota: 2 };
+function checkTheses(onlySym = null) {
+  const T = state.thesis;
+  if (!T) return;
+  for (const [sym, th] of T.list()) {
+    if (onlySym && sym !== onlySym) continue;
+    const ctx = thesisCtx(sym);
+    if (!(ctx.price > 0)) continue;
+    const ev = evalThesis(th, ctx);
+    const prev = th.lastStatus || 'intacta';
+    if (ev.status === prev) continue;
+    T.set(sym, { lastStatus: ev.status });
+    T.log(sym, { status: ev.status, note: ev.flags.map((f) => f.txt).join(' ') || 'Todo en orden otra vez.' });
+    if (TH_LVL[ev.status] > TH_LVL[prev] && state.settings.notifySignals) {
+      notify({ title: `${STATUS[ev.status].emoji} ${sym}: ${STATUS[ev.status].label}`, body: ev.flags.map((f) => f.txt).join(' '), kind: ev.status === 'rota' ? 'alert-down' : 'info', sym });
+    }
+  }
+}
+
+// --- Portafolio ---
+function cartUniverse(u) {
+  const list = u === 'pulso' ? UNIVERSE.filter((c) => !c.intl).map((c) => c.s) : state.follow;
+  return [...new Set(list)].filter(usd);
+}
+function recMethod() {
+  const o = state.pf.ref && state.pf.ref.opt && state.pf.ref.opt.big;
+  if (!o) return 'ew';
+  const better = Object.entries(o.vsEW).filter(([, c]) => c.sharpe && c.sharpe.lo > 0).sort((a, b) => b[1].sharpe.est - a[1].sharpe.est);
+  return better.length ? better[0][0] : 'ew';
+}
+function computeBuilt({ amount, universe, method, fractional }) {
+  const syms = cartUniverse(universe);
+  const series = syms.map((s) => {
+    const h = state.hist[s];
+    if (!h || h.length < 120) return null;
+    return { sym: s, closes: h.map((b) => b.close), times: h.map((b) => b.time) };
+  }).filter(Boolean);
+  const missing = syms.filter((s) => !series.some((x) => x.sym === s));
+  if (series.length < 2) {
+    return { error: series.length ? 'Necesitas al menos 2 empresas con historial de precios.' : 'Aún no hay historial de precios: espera a que termine el análisis (o agrega tu clave de Twelve Data en Ajustes).', missing };
+  }
+  const al = alignReturns(series, 252);
+  if (!al) return { error: 'Las empresas no tienen suficientes fechas en común.', missing };
+  const w = buildWeights(method, al.R, { cap: state.risk.maxPos });
+  const S = ledoitWolf(al.R).cov;
+  const weights = Object.fromEntries(al.syms.map((s, i) => [s, w[i]]));
+  const prices = Object.fromEntries(al.syms.map((s) => [s, pxOf(s) || lastOf(state.hist[s]).close]));
+  const alloc = discreteAllocation(weights, prices, amount, { fractional });
+  const bySec = {};
+  for (const r of alloc.rows) bySec[meta(r.sym).sec] = (bySec[meta(r.sym).sec] || 0) + r.target;
+  return { method, universe, amount, fractional, syms: al.syms, weights, alloc, risk: portfolioRisk(w, S), avgCorr: avgCorrelation(S), days: al.R.length, bySec, missing: missing.concat(syms.filter((s) => !al.syms.includes(s) && !missing.includes(s))), at: Date.now() };
+}
+function rebalanceCartera(force = false) {
+  const P = state.paper;
+  if (!P) return false;
+  const a = P.acc('cartera');
+  if (!a || !a.target) return false;
+  if (!force && a.last && Date.now() - a.last < 30 * 864e5) return false;
+  const b = computeBuilt({ ...a.target, amount: P.value('cartera', pxOf), fractional: true });
+  if (b.error) return false;
+  const label = METHODS[b.method].name;
+  if (!P.rebalanceWeights('cartera', b.weights, pxOf, label)) return false;
+  P.snapshot(pxOf, true);
+  if (!force) toast({ title: '🧭 Mi portafolio se rebalanceó (simulado)', body: `${label} · ${b.syms.length} empresas`, kind: 'info' });
+  return true;
+}
+function applyCartera() {
+  const P = state.paper;
+  const b = state.built;
+  if (!P || !b || b.error) return;
+  const a = P.acc('cartera');
+  a.target = { method: b.method, universe: b.universe };
+  P.persist();
+  if (rebalanceCartera(true)) {
+    toast({ title: '🧭 Portafolio aplicado (simulado)', body: `${METHODS[b.method].name} con ${b.syms.length} empresas en la cuenta "Mi portafolio". Se rebalancea solo cada mes; compáralo con el S&P 500 en Cuenta virtual.`, kind: 'info' });
+  } else toast({ title: 'No se pudo aplicar', body: 'Faltan precios en vivo de algunas empresas; intenta después del próximo análisis.', kind: 'info' });
+}
+
+function afterScanPhase2() {
+  const held = Object.keys((manualAcc() || { pos: {} }).pos);
+  queueEarnings([...new Set([...state.follow, ...held])]);
+  checkTheses();
+  checkKill();
+  rebalanceCartera();
+}
+
+// --- Evidencia (prueba histórica de la Fase 2) ---
+function methodEvidence(k) {
+  const o = state.pf.ref && state.pf.ref.opt && state.pf.ref.opt.big;
+  const m = o && o.methods[k];
+  if (!m) return '';
+  return `<span class="ev-mini">En la prueba: ${pp(m.all.cagr)} al año · volatilidad ${pp(m.all.vol, 0)} · peor caída ${pp(m.all.mdd, 0)}</span>`;
+}
+function optTable(o) {
+  const rows = ['ew', 'iv', 'hrp', 'mv', 'spy'].map((k) => {
+    const m = o.methods[k];
+    if (!m) return '';
+    return `<tr><td>${k === 'spy' ? 'S&amp;P 500' : METHODS[k].short}</td><td>${pp(m.all.cagr)}</td><td>${pp(m.all.vol, 0)}</td><td>${num2(m.all.sharpe)}</td><td>${m.a ? pp(m.a.mdd, 0) : '—'}</td><td>${m.b ? pp(m.b.mdd, 0) : '—'}</td></tr>`;
+  }).join('');
+  return `<div class="m-wrap"><table class="bt-table"><thead><tr><th></th><th>Al año</th><th>Volat.</th><th>Sharpe</th><th>Caída 2016–21</th><th>Caída 2022+</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+function optEvidence() {
+  const O = state.pf.ref && state.pf.ref.opt;
+  if (!O) return '';
+  const o = O.big;
+  const ew = o.methods.ew.all;
+  const mv = o.methods.mv.all;
+  const v = o.vsEW;
+  const allVolDown = Object.values(v).every((c) => c.vol.hi < 0);
+  const allRetDown = Object.values(v).every((c) => c.ret.hi < 0);
+  const anySharpe = Object.values(v).some((c) => c.sharpe.lo > 0);
+  const lines = [
+    { tone: allVolDown ? 'good' : 'warn', txt: allVolDown ? `Todos los métodos bajaron la volatilidad de forma confiable: mínima varianza la llevó de ${pp(ew.vol, 0)} a ${pp(mv.vol, 0)} al año.` : 'No todos los métodos bajaron la volatilidad de forma confiable.' },
+    { tone: allRetDown ? 'bad' : 'warn', txt: `${allRetDown ? 'Pero todos ganaron menos' : 'La ganancia cambió poco'}: mínima varianza ${pctS(v.mv.ret.est)} al año contra partes iguales (de ${pctS(v.mv.ret.lo)} a ${pctS(v.mv.ret.hi)}); HRP ${pctS(v.hrp.ret.est)}; paridad simple ${pctS(v.iv.ret.est)}.` },
+    { tone: anySharpe ? 'good' : 'bad', txt: anySharpe ? 'Algún método mejoró la ganancia por unidad de riesgo (Sharpe) de forma confiable.' : 'La ganancia por unidad de riesgo (Sharpe) no mejoró con ninguno: repartir en partes iguales sigue siendo la opción a vencer (coincide con DeMiguel y otros, 2009).' },
+    { tone: 'neutral', txt: `En la caída del COVID (2020) casi no protegieron: todo cayó junto (${pp(o.methods.ew.a.mdd, 0)} con partes iguales vs ${pp(o.methods.mv.a.mdd, 0)} con mínima varianza). En 2022 sí ayudaron: ${pp(o.methods.ew.b.mdd, 0)} vs ${pp(o.methods.mv.b.mdd, 0)}.` },
+  ];
+  return `<section class="card">
+    <h3>📏 ¿Optimizar sirve? Prueba ${o.period.from.slice(0, 4)}–${o.period.to.slice(0, 4)}</h3>
+    <p class="hint" style="margin-top:0">${esc(o.label)} · rebalanceo mensual con solo el último año de datos de cada fecha (sin ver el futuro) · ${o.rebalances} rebalanceos · costo ${(state.pf.ref.params.cost * 100).toFixed(1)}% por operación · tope ${pp(state.pf.ref.params.cap, 0)} por empresa.</p>
+    <ul class="bt-concl">${lines.map((l) => `<li class="tone-${l.tone}">${esc(l.txt)}</li>`).join('')}</ul>
+    ${optTable(o)}
+    <details><summary>Réplica con las ${O.app.universe} empresas de Pulso</summary>${optTable(O.app)}<p class="hint">Mismo patrón: menos volatilidad, menos ganancia y Sharpe parecido. Ojo: estas empresas se eligieron hoy sabiendo que les fue bien (sesgo de supervivencia), así que sus ganancias están infladas.</p></details>
+    <p class="hint">Conclusión práctica: elige el método por cuánto movimiento toleras, no para ganar más. Si las caídas te harían vender en pánico, menos volatilidad vale la pena aunque ganes algo menos.</p>
+  </section>`;
+}
+function stopsEvidence() {
+  const S = state.pf.ref && state.pf.ref.stops;
+  if (!S) return '';
+  const b = S.big;
+  const c = b.calib;
+  const ex = b.exits;
+  const base = b.strat.base.all;
+  const A = b.strat.A.all;
+  const v = b.vsBase.A;
+  const ap = S.app.strat;
+  const helps = v.ret.lo > 0 || v.sharpe.lo > 0;
+  return `<section class="card">
+    <h3>📏 ¿Sirven los stops? Prueba ${b.period.from.slice(0, 4)}–${b.period.to.slice(0, 4)}</h3>
+    <p class="hint" style="margin-top:0">${esc(b.label)} · Cada mes se fijó el stop en el escenario malo (5%) a 1 mes; si una acción cerraba por debajo, se vendía al cierre del día siguiente y se volvía a comprar en el siguiente rebalanceo.</p>
+    <ul class="bt-concl">
+      <li class="tone-warn">Probabilidad de que algún cierre toque el stop en 1 mes: la fórmula decía ${pp(c.all.pred)} y pasó ${pp(c.all.real)} de las veces. Por eso Pulso muestra la cifra medida: ${pp(c.low.real, 0)} en acciones tranquilas, ${pp(c.mid.real, 0)} en las medias y ${pp(c.high.real, 0)} en las volátiles.</li>
+      <li class="tone-${helps ? 'good' : 'bad'}">Ganancia: ${pp(A.cagr)} al año con stops vs ${pp(base.cagr)} sin stops (diferencia ${pctS(v.ret.est)} al año, de ${pctS(v.ret.lo)} a ${pctS(v.ret.hi)}): ${helps ? 'con ventaja.' : 'sin ventaja demostrada.'}</li>
+      <li class="tone-neutral">Peor caída: ${pp(A.mdd, 0)} con stops vs ${pp(base.mdd, 0)} sin stops en estas empresas, pero en las de Pulso fue al revés (${pp(ap.A.all.mdd, 0)} vs ${pp(ap.base.all.mdd, 0)}): vender después de cada bajada y volver a comprar al mes siguiente sale caro cuando el precio sube y baja varias veces.</li>
+      <li class="tone-good">Lo que sí hacen: acotar la pérdida de cada operación. Al tocarse el stop, la pérdida real fue en promedio ${ex.ratioMean.toFixed(2)}× la planeada (${ex.ratioP90.toFixed(1)}× en 1 de cada 10 casos, por saltos de precio).</li>
+      <li class="tone-warn">Prepárate: cada acción tocó su stop ~${ex.perStockYear.toFixed(1)} ${ex.perStockYear.toFixed(1) === '1.0' ? 'vez' : 'veces'} al año, y después de vender subió en ${pp(ex.afterUp, 0)} de los casos durante lo que quedaba del mes.</li>
+    </ul>
+    <p class="hint">Conclusión práctica: el stop sirve para calcular cuánto comprar y para que una sola acción no te haga mucho daño; no para ganar más. Costos supuestos: 0.1% por operación.</p>
+  </section>`;
+}
+
+// --- Vista Cartera ---
+const CART_TABS = [['riesgo', '🛡️ Riesgo'], ['portafolio', '🧮 Portafolio'], ['aportes', '📅 Aportes']];
+function viewCartera() {
+  const t = state.carteraTab;
+  const seg = `<div class="seg">${CART_TABS.map(([k, l]) => `<button class="${t === k ? 'active' : ''}" data-ctab="${k}">${l}</button>`).join('')}</div>`;
+  const body = t === 'portafolio' ? cartPortfolio() : t === 'aportes' ? cartPlan() : cartRisk();
+  return `<div class="page-head"><h2>🧭 Cartera y riesgo</h2><p>Cuánto comprar, cómo repartir tu dinero y cuánto podrías juntar</p></div>${seg}${body}${disclaimer()}`;
+}
+
+function riskChips(key, opts, fmt) {
+  return `<div class="quick">${opts.map((v) => `<button class="${Math.abs(state.risk[key] - v) < 1e-9 ? 'on' : ''}" data-risk="${key}" data-val="${v}">${fmt(v)}</button>`).join('')}</div>`;
+}
+
+function cartRisk() {
+  const r = state.risk;
+  const k = killState();
+  const acc = manualAcc();
+  const cap = capitalBase();
+  const positions = acc ? Object.keys(acc.pos).map((sym) => ({ sym, value: heldValue(sym) })) : [];
+  const ex = exposure(positions, cap, (s) => meta(s).sec);
+  const warns = [];
+  ex.sectors.filter((s) => s.pct > r.maxSector + 1e-9).forEach((s) => warns.push(`${secLabel(s.id)} pesa ${pp(s.pct, 0)} de tu capital (tu máximo: ${pp(r.maxSector, 0)}).`));
+  ex.top.filter((p) => p.pct > r.maxPos + 1e-9).forEach((p) => warns.push(`${p.sym} pesa ${pp(p.pct, 0)} de tu capital (tu máximo por empresa: ${pp(r.maxPos, 0)}).`));
+  const noStop = ex.top.filter((p) => { const th = state.thesis && state.thesis.get(p.sym); return !(th && th.stop); }).map((p) => p.sym);
+  if (noStop.length) warns.push(`Sin stop escrito: ${noStop.join(', ')}. Escribe tu tesis desde el detalle de cada empresa.`);
+  const posRows = ex.top.map((p) => {
+    const th = state.thesis && state.thesis.get(p.sym);
+    const ev = thesisEval(p.sym);
+    return `<div class="tr-row" data-open="${esc(p.sym)}"><b>${esc(p.sym)}</b> ${pp(p.pct, 1)} de tu capital · ${th && th.stop ? `stop ${money(th.stop, curOf(p.sym))}` : '<span class="muted">sin stop</span>'}
+      ${ev ? `<span class="th-chip ${STATUS[ev.status].tone}">${STATUS[ev.status].emoji} ${STATUS[ev.status].label}</span>` : ''}</div>`;
+  }).join('');
+  const ddPct = Math.min(1, Math.abs(Math.min(0, k.dd)) / k.limit);
+  return `
+    ${k.active ? `<div class="concl-line tone-bad">🛑 <b>Freno de emergencia activado.</b> Tu cuenta virtual cayó ${pctS(k.dd)} desde su máximo (tu límite: −${pp(k.limit, 0)}). Tu propia regla dice pausar las compras nuevas y revisar tus tesis.</div>` : ''}
+    <section class="card">
+      <h3>🛡️ Tu perfil de riesgo</h3>
+      <p class="hint" style="margin-top:0">Con esto Pulso calcula cuánto comprar de cada empresa (tarjeta "¿Cuánto comprar?" en el detalle).</p>
+      <label class="field"><span>Capital base (USD) · 0 = usar tu cuenta virtual (${money(state.paper ? state.paper.value('manual', pxOf) : 10000)})</span>
+        <input id="risk-capital" type="number" inputmode="decimal" min="0" step="100" value="${r.capital || 0}"></label>
+      <div class="risk-q">Pérdida máxima por operación si se toca el stop</div>
+      ${riskChips('riskPct', [0.005, 0.01, 0.02], (v) => (v * 100).toFixed(v < 0.01 ? 1 : 0) + '%')}
+      <div class="risk-q">Máximo en una sola empresa</div>
+      ${riskChips('maxPos', [0.1, 0.15, 0.2, 0.25], (v) => Math.round(v * 100) + '%')}
+      <div class="risk-q">Máximo en un solo sector</div>
+      ${riskChips('maxSector', [0.3, 0.4, 0.5], (v) => Math.round(v * 100) + '%')}
+      <div class="risk-q">Freno de emergencia: pausar compras si la cuenta cae</div>
+      ${riskChips('killDD', [0.1, 0.15, 0.2], (v) => '−' + Math.round(v * 100) + '%')}
+      <div class="setting" style="margin-top:8px"><div><b>Mitad de tamaño antes de resultados</b><small>Si la empresa reporta en menos de 30 días (precaución, no validada)</small></div>
+        <label class="switch"><input type="checkbox" data-riskflag="halfOnEarnings" ${r.halfOnEarnings ? 'checked' : ''}><span></span></label></div>
+      <div class="setting"><div><b>Acciones fraccionadas</b><small>Si tu bróker permite comprar pedacitos de acción</small></div>
+        <label class="switch"><input type="checkbox" data-riskflag="fractional" ${r.fractional ? 'checked' : ''}><span></span></label></div>
+      <p class="hint">La regla del ${pp(r.riskPct, r.riskPct < 0.01 ? 1 : 0)}: si cada operación puede costarte como máximo eso, necesitarías ${Math.round(Math.log(0.5) / Math.log(1 - r.riskPct))} pérdidas seguidas para perder la mitad del capital.</p>
+    </section>
+    <section class="card">
+      <h3>📊 Tu cuenta virtual hoy</h3>
+      <div class="prec-grid">
+        <div><b>${money(cap)}</b><span>capital base</span></div>
+        <div><b>${pp(1 - ex.cashPct, 0)}</b><span>invertido</span></div>
+        <div><b class="${k.dd < -0.0005 ? 'down' : ''}">${k.dd < -0.0005 ? pctS(k.dd) : '0%'}</b><span>caída desde el máximo (freno en −${pp(k.limit, 0)})</span></div>
+      </div>
+      <div class="sbar"><span>Camino al freno</span><div class="sbar-track"><i class="${k.active ? 'over' : ''}" style="width:${(ddPct * 100).toFixed(0)}%"></i></div><b>${Math.round(ddPct * 100)}%</b></div>
+      ${ex.sectors.length ? `<h4 class="sub">Por sector (la raya amarilla es tu máximo)</h4>${ex.sectors.map((s) => sbar(secLabel(s.id), s.pct, r.maxSector)).join('')}` : '<p class="hint">Aún no tienes posiciones en "Mis operaciones". Compra desde el detalle de una empresa (dinero simulado).</p>'}
+      ${posRows ? `<h4 class="sub">Posiciones</h4>${posRows}` : ''}
+      ${warns.length ? `<ul class="bt-concl">${warns.map((w) => `<li class="tone-warn">${esc(w)}</li>`).join('')}</ul>` : positions.length ? '<p class="hint">✅ Dentro de tus límites.</p>' : ''}
+    </section>
+    ${stopsEvidence()}
+    <div class="row-btns"><a class="btn" href="#/cuenta">💼 Cuenta virtual</a><a class="btn" href="#/precision">📏 Precisión</a></div>`;
+}
+
+function cartPortfolio() {
+  const B = state.builder;
+  const b = state.built;
+  const rec = recMethod();
+  const nF = cartUniverse('follow').length;
+  const nP = cartUniverse('pulso').length;
+  let res = '';
+  if (b && b.error) res = `<section class="card"><p class="hint warn" style="margin:0">${esc(b.error)}</p></section>`;
+  else if (b) {
+    const rows = b.alloc.rows.map((r) => `<tr data-open="${esc(r.sym)}"><td><b>${esc(r.sym)}</b></td><td>${b.fractional ? r.shares.toFixed(r.shares < 10 ? 3 : 2) : r.shares}</td><td>${money(r.value)}</td><td>${pp(r.target, 1)}</td></tr>`).join('');
+    const badMonth = b.amount * (1 - Math.exp(-1.645 * (b.risk.vol / Math.sqrt(12))));
+    const secs = Object.entries(b.bySec).sort((x, y) => y[1] - x[1]).map(([s, w]) => sbar(secLabel(s), w, state.risk.maxSector)).join('');
+    res = `<section class="card glow">
+      <div class="eyebrow">${esc(METHODS[b.method].name)} · ${b.syms.length} empresas · ${money(b.amount)}${state.provider && state.provider.mode === 'demo' ? ' · datos simulados' : ''}</div>
+      <div class="m-wrap" style="margin-top:8px"><table class="bt-table"><thead><tr><th>Empresa</th><th>Acciones</th><th>Monto</th><th>Peso</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <p class="hint">Queda en efectivo: <b>${money(b.alloc.leftover)}</b>${b.missing.length ? ` · Sin historial suficiente (no incluidas): ${esc(b.missing.join(', '))}` : ''}</p>
+      <div class="prec-grid">
+        <div><b>${pp(b.risk.vol, 0)}</b><span>volatilidad esperada al año</span></div>
+        <div><b class="down">−${money(badMonth)}</b><span>en un mes malo (1 de cada 20)</span></div>
+        <div><b>${b.risk.effN.toFixed(1)}</b><span>empresas "efectivas" (diversificación)</span></div>
+      </div>
+      <h4 class="sub">Por sector</h4>${secs}
+      <p class="hint">Calculado con ${b.days} días de historia · correlación promedio ${b.avgCorr.toFixed(2)} (cerca de 1 = se mueven juntas y diversificas poco) · tope por empresa ${pp(Math.max(state.risk.maxPos, 1 / b.syms.length), 0)}${b.syms.length < 5 ? ' · con menos de 5 empresas no hay mucho que optimizar' : ''}. El "mes malo" es aproximado y puede ser peor en una crisis.</p>
+      <div class="row-btns"><button class="btn primary" data-action="pf-apply">🧭 Probarlo en la cuenta virtual</button></div>
+      <p class="hint">Se aplica a la cuenta "Mi portafolio" (con sus ${money(state.paper ? state.paper.value('cartera', pxOf) : 10000)} simulados) y se rebalancea sola cada mes, para ver si le gana al S&amp;P 500 antes de usar dinero real.</p>
+    </section>`;
+  }
+  return `<section class="card">
+      <h3>🧮 Arma tu portafolio</h3>
+      <label class="field"><span>¿Cuánto quieres invertir? (USD)</span><input id="pf-amount" type="number" inputmode="decimal" min="100" step="100" value="${B.amount}"></label>
+      <div class="risk-q">¿Con qué empresas?</div>
+      <div class="seg"><button class="${B.universe === 'follow' ? 'active' : ''}" data-pfu="follow">⭐ Las que sigo (${nF})</button><button class="${B.universe === 'pulso' ? 'active' : ''}" data-pfu="pulso">📡 Las ${nP} de Pulso</button></div>
+      <div class="risk-q">¿Cómo repartir el dinero?</div>
+      <div class="mlist">${Object.entries(METHODS).map(([k, m]) => `<button class="mopt ${B.method === k ? 'on' : ''}" data-pfm="${k}"><b>${esc(m.name)}${k === rec ? ' · recomendado' : ''}</b><small>${esc(m.desc)}</small>${methodEvidence(k)}</button>`).join('')}</div>
+      <div class="setting" style="margin-top:8px"><div><b>Acciones fraccionadas</b><small>Si tu bróker permite comprar pedacitos de acción</small></div>
+        <label class="switch"><input type="checkbox" data-pfflag="fractional" ${B.fractional ? 'checked' : ''}><span></span></label></div>
+      <button class="btn primary block" style="margin-top:10px" data-action="pf-build">Calcular reparto</button>
+      <p class="hint">No hay método de "máxima ganancia" a propósito: exige predecir rendimientos, y eso es lo que no pasó las pruebas de Pulso. Samsung (wones) no se incluye.</p>
+    </section>
+    ${res}
+    ${optEvidence()}`;
+}
+
+let planMemo = null;
+let planTimer = null;
+function planCompute() {
+  const I = state.planIn;
+  const preset = PLAN_PRESETS[I.preset];
+  const ret0 = preset ? preset.ret : I.ret;
+  const vol = preset ? preset.vol : I.vol;
+  const ret = I.real ? (1 + ret0) / (1 + INFLATION) - 1 : ret0;
+  const months = Math.round(I.years * 12);
+  const key = JSON.stringify([I.initial, I.monthly, months, ret, vol, I.goal]);
+  if (planMemo && planMemo.key === key) return planMemo;
+  if (!state.planShocks || state.planShocks.months !== months) state.planShocks = makeShocks(months, 5000);
+  const sh = state.planShocks;
+  const plan = runPlan(sh, { initial: I.initial, monthly: I.monthly, ret, vol, goal: I.goal });
+  const sub = { months: sh.months, paths: 2000, z: sh.z.subarray(0, 2000 * sh.months) };
+  const need = I.goal > 0 ? solveMonthly(sub, { initial: I.initial, ret, vol }, I.goal, 0.8) : null;
+  planMemo = { key, plan, need, ret, vol };
+  return planMemo;
+}
+function planOut() {
+  const I = state.planIn;
+  const { plan, need, ret, vol } = planCompute();
+  const f = plan.final;
+  return `${planChart(plan, { goal: I.goal })}
+    <div class="legend" style="flex-wrap:wrap"><span><i style="background:#fff"></i>Escenario típico</span><span><i style="background:var(--gold)"></i>Lo que aportas</span><span><i style="background:var(--cyan)"></i>Rango probable (50%)</span></div>
+    <div class="prec-grid">
+      <div><b class="down">${money(f.p5)}</b><span>escenario malo (1 de cada 20)</span></div>
+      <div><b>${money(f.p50)}</b><span>escenario típico</span></div>
+      <div><b class="up">${money(f.p95)}</b><span>escenario bueno (1 de cada 20)</span></div>
+    </div>
+    <ul class="bt-concl">
+      <li>Aportarías ${money(plan.contributed)} en total${I.real ? ' (todo en dinero de hoy)' : ''}. Supuesto: ${pp(ret, 1)} al año${I.real ? ' ya sin inflación' : ''}, volatilidad ${pp(vol, 0)}.</li>
+      <li class="tone-${plan.probBelow > 0.15 ? 'warn' : 'neutral'}">Probabilidad de terminar con MENOS de lo que aportaste: ${pp(plan.probBelow, 0)}.</li>
+      ${I.goal > 0 ? `<li class="tone-${plan.probGoal >= 0.8 ? 'good' : plan.probGoal >= 0.5 ? 'warn' : 'bad'}">Probabilidad de llegar a tu meta de ${money(I.goal)}: ${pp(plan.probGoal, 0)}.${need != null ? (need === 0 ? ' Con tu dinero inicial ya tienes al menos 80% de probabilidad.' : ` Para tener 80% de probabilidad necesitarías aportar ~${money(Math.ceil(need))} al mes.`) : ''}</li>` : ''}
+      <li>Habrá caídas en el camino: en un escenario típico tu inversión llega a estar ${pp(-plan.typicalDrop, 0)} abajo de su máximo en algún momento; en 1 de cada 10, más de ${pp(-plan.badDrop, 0)}. Vender en esas caídas convierte una baja temporal en pérdida real.</li>
+    </ul>`;
+}
+function cartPlan() {
+  const I = state.planIn;
+  const preset = PLAN_PRESETS[I.preset];
+  return `<section class="card plan-in">
+      <h3>📅 Plan de aportes</h3>
+      <div class="two">
+        <label class="field"><span>Inversión inicial</span><input id="pl-initial" type="number" inputmode="decimal" min="0" step="100" value="${I.initial}"></label>
+        <label class="field"><span>Aporte cada mes</span><input id="pl-monthly" type="number" inputmode="decimal" min="0" step="10" value="${I.monthly}"></label>
+      </div>
+      <div class="risk-q">¿Por cuántos años?</div>
+      <div class="quick">${[5, 10, 15, 20, 30].map((y) => `<button class="${I.years === y ? 'on' : ''}" data-ply="${y}">${y}</button>`).join('')}</div>
+      <div class="risk-q">Supuesto de rendimiento</div>
+      <div class="seg">${[['prudente', 'Prudente 6%'], ['historico', 'Histórico ~10%'], ['custom', 'Personalizado']].map(([k, l]) => `<button class="${I.preset === k ? 'active' : ''}" data-plp="${k}">${l}</button>`).join('')}</div>
+      ${I.preset === 'custom' ? `<div class="two"><label class="field"><span>Rendimiento anual (%)</span><input id="pl-ret" type="number" inputmode="decimal" step="0.5" min="-5" max="25" value="${(I.ret * 100).toFixed(1)}"></label>
+        <label class="field"><span>Volatilidad anual (%)</span><input id="pl-vol" type="number" inputmode="decimal" step="1" min="2" max="60" value="${(I.vol * 100).toFixed(0)}"></label></div>`
+        : `<p class="hint">${esc(preset ? preset.desc : '')}</p>`}
+      <label class="field"><span>Meta (opcional, USD)</span><input id="pl-goal" type="number" inputmode="decimal" min="0" step="1000" value="${I.goal || ''}" placeholder="Ej. 50000"></label>
+      <div class="setting"><div><b>En dinero de hoy</b><small>Descuenta una inflación de ${pp(INFLATION, 0)} al año</small></div>
+        <label class="switch"><input type="checkbox" data-plflag="real" ${I.real ? 'checked' : ''}><span></span></label></div>
+    </section>
+    <section class="card glow"><div id="plan-out">${planOut()}</div></section>
+    <section class="card">
+      <h3>💡 Lo que conviene saber</h3>
+      <ul class="bt-concl">
+        <li>Si ya tienes todo el dinero, invertirlo de una vez le ganó a meterlo poco a poco en ~2 de cada 3 periodos históricos (Vanguard, 2012), porque la bolsa sube más de lo que baja. Aportar cada mes sirve sobre todo porque inviertes conforme ganas y te quita la tentación de adivinar el momento.</li>
+        <li>5,000 escenarios con rachas de crisis: los meses malos llegan juntos, como en 2008 o 2020.</li>
+        <li>No incluye impuestos ni comisiones. Ningún supuesto está garantizado: el rango importa más que el número del centro.</li>
+      </ul>
+    </section>`;
+}
+
+// --- Detalle de empresa: ¿cuánto comprar?, tesis y calendario ---
+function sizingCard(sym) {
+  const a = state.analyses[sym];
+  if (!a || a.error || !usd(sym)) return '';
+  const R = riskPlan(sym);
+  if (!R || !R.size) return '';
+  const { st, size, capital, calib, earnDays } = R;
+  const cur = curOf(sym);
+  const r = state.risk;
+  const limTxt = {
+    risk: `tu regla de riesgo (perder como máximo ${pp(size.riskBudget / capital, 1)} del capital si se toca el stop)`,
+    pos: `tu máximo por empresa (${pp(r.maxPos, 0)})`,
+    sector: `tu máximo por sector (${pp(r.maxSector, 0)} en ${sectorName(a.sec)})`,
+    cash: 'tu efectivo disponible en la cuenta virtual',
+  }[size.limit];
+  const k = killState();
+  const prob = calib ? calib.real : st.prob;
+  const ref = state.pf.ref && state.pf.ref.stops && state.pf.ref.stops.big;
+  const sharesTxt = r.fractional ? size.shares.toFixed(size.shares < 10 ? 2 : 1) : String(size.shares);
+  const zero = !(size.amount >= 1);
+  let zeroTxt = {
+    pos: `Ya tienes ${pp(heldValue(sym) / capital, 0)} de tu capital en ${sym} y tu máximo por empresa es ${pp(r.maxPos, 0)}: tu perfil dice no comprar más.`,
+    sector: `${secLabel(a.sec)} ya pesa ${pp(sectorValue(a.sec) / capital, 0)} de tu capital (máximo ${pp(r.maxSector, 0)}): tu perfil dice no sumar más de ese sector.`,
+    cash: 'No tienes efectivo disponible en "Mis operaciones" (cuenta virtual).',
+    risk: 'Con tu regla de riesgo y este stop, el tamaño sale prácticamente cero.',
+  }[size.limit];
+  if (zero && !r.fractional && size.lim[size.limit] >= 1) zeroTxt = 'Con tus límites no alcanza para 1 acción entera: activa las acciones fraccionadas o sube el capital en tu perfil.';
+  return `<section class="card size-card">
+    <h3>🎯 ¿Cuánto comprar?</h3>
+    ${k.active ? `<div class="concl-line tone-bad">🛑 Freno activado: tu cuenta virtual cayó ${pctS(k.dd)} desde su máximo. Tu regla dice pausar compras nuevas.</div>` : ''}
+    ${zero ? `<div class="concl-line tone-warn">${esc(zeroTxt)}</div>` : `<div class="prec-grid">
+      <div><b>${sharesTxt}</b><span>acciones ≈ ${money(size.amount)} (${pp(size.pct, 1)} de tu capital)</span></div>
+      <div><b class="down">${money(st.stop, cur)}</b><span>stop de cierre (${pctS(-st.dist)})</span></div>
+      <div><b class="down">−${money(size.maxLoss)}</b><span>si se toca el stop (${pp(size.maxLossPct, 1)} del capital)</span></div>
+    </div>`}
+    <p class="hint" style="margin-top:4px">${zero ? `Stop de cierre de referencia: ${money(st.stop, cur)} (${pctS(-st.dist)}).` : `Lo limita ${limTxt}.`}${size.halved ? ` 📅 Presenta resultados en ${earnDays} día${earnDays === 1 ? '' : 's'}: tamaño a la mitad por precaución.` : ''}</p>
+    <ul class="bt-concl">
+      <li>El stop es el escenario malo (5%) a 1 mes. Si la acción <b>cierra</b> por debajo, la regla dice vender al día siguiente.</li>
+      <li>Probabilidad de que algún cierre lo toque en 1 mes: <b>${pp(prob, 0)}</b>${calib ? ` (medida en 10 años con acciones ${calib.label}; la fórmula sola diría ${pp(st.prob, 0)})` : ''}.</li>
+      ${ref ? `<li>Puedes perder algo más de lo planeado si el precio abre con un salto: en la prueba, la pérdida real fue en promedio ${ref.exits.ratioMean.toFixed(2)}× la planeada.</li>` : ''}
+    </ul>
+    <div class="row-btns">
+      ${zero ? '' : `<button class="btn primary" data-action="paper-open" data-sym="${esc(sym)}" data-amt="${Math.floor(size.amount)}">💼 Comprar este tamaño</button>`}
+      <a class="btn" href="#/cartera">🛡️ Mi perfil</a>
+    </div>
+    <p class="hint">Capital base: ${money(capital)} (${r.capital > 0 ? 'lo fijaste en tu perfil' : 'valor de "Mis operaciones" en la cuenta virtual'}). Esto no dice si la acción va a subir: dice cuánto arriesgar para que un error no te saque del juego. La compra es con dinero simulado.</p>
+  </section>`;
+}
+
+function thesisCard(sym) {
+  const a = state.analyses[sym];
+  if (!a || a.error || !state.thesis) return '';
+  const th = state.thesis.get(sym);
+  if (!th) {
+    return `<section class="card"><h3>📝 Mi tesis</h3>
+      <p class="hint" style="margin-top:0">Antes de comprar, escribe por qué lo haces y en qué caso venderías. Tendemos a vender rápido lo que gana y aferrarnos a lo que pierde (Odean, 1998); una regla escrita de antemano ayuda a evitarlo. Pulso la revisará sola todos los días.</p>
+      <button class="btn block" style="margin-top:12px" data-action="thesis-edit" data-sym="${esc(sym)}">✍️ Escribir mi tesis</button></section>`;
+  }
+  const ev = thesisEval(sym);
+  const S = STATUS[ev.status];
+  const cur = curOf(sym);
+  const price = pxOf(sym) || a.price;
+  const meta2 = [
+    th.type === 'corto' ? '⚡ Corto plazo' : '🌱 Largo plazo',
+    th.entry ? `Entrada ${money(th.entry, cur)} (${pctS(price / th.entry - 1)})` : null,
+    `Stop ${th.stop ? money(th.stop, cur) : '—'}`,
+    `Objetivo ${th.target ? money(th.target, cur) : '—'}`,
+    `Revisión cada ${th.reviewDays || 90} días`,
+  ].filter(Boolean).join(' · ');
+  return `<section class="card thesis">
+    <div class="th-head"><h3>📝 Mi tesis</h3><span class="th-chip ${S.tone}">${S.emoji} ${S.label}</span></div>
+    ${th.why ? `<blockquote>${esc(th.why)}</blockquote>` : ''}
+    <div class="th-meta">${meta2}</div>
+    <div class="th-checks">${CHECKS.map((c) => `<span class="${th.checks && th.checks[c.k] ? 'ok' : 'no'}">${th.checks && th.checks[c.k] ? '✓' : '✗'} ${esc(c.txt)}</span>`).join('')}</div>
+    ${ev.flags.length ? `<ul class="bt-concl">${ev.flags.map((f) => `<li class="tone-${f.lvl === 2 ? 'bad' : 'warn'}">${esc(f.txt)}</li>`).join('')}</ul>` : '<p class="hint">✅ Todo en orden según tus propias condiciones.</p>'}
+    <div class="row-btns"><button class="btn sm" data-action="thesis-review" data-sym="${esc(sym)}">✅ Ya la revisé</button><button class="btn sm" data-action="thesis-edit" data-sym="${esc(sym)}">✍️ Editar</button><button class="btn sm ghost" data-action="thesis-delete" data-sym="${esc(sym)}">Borrar</button></div>
+    ${th.log && th.log.length ? `<details><summary>Historial (${th.log.length})</summary>${th.log.slice(0, 10).map((l) => `<div class="tr-row">${STATUS[l.status] ? STATUS[l.status].emoji : '📝'} ${esc(l.note || '')}<small>${ago(l.t)}</small></div>`).join('')}</details>` : ''}
+  </section>`;
+}
+
+function openThesisEditor(sym) {
+  const a = state.analyses[sym];
+  const th = (state.thesis && state.thesis.get(sym)) || {};
+  const R = riskPlan(sym);
+  const price = pxOf(sym) || (a && !a.error ? a.price : 0);
+  const cur = curOf(sym);
+  const stop = th.stop || (R ? +R.st.stop.toFixed(2) : '');
+  state.thType = th.type || 'largo';
+  openModal(`<div class="grab"></div>
+    <h3>📝 Tesis de ${esc(sym)}</h3>
+    <p class="muted" style="margin:6px 0 0">${esc(meta(sym).n)} · precio actual ${pxEl(sym, price)}</p>
+    <div class="seg" style="margin-top:12px"><button class="${state.thType !== 'corto' ? 'active' : ''}" data-thtype="largo">🌱 Largo plazo</button><button class="${state.thType === 'corto' ? 'active' : ''}" data-thtype="corto">⚡ Corto plazo</button></div>
+    <label class="field"><span>¿Por qué la compras? (con tus palabras)</span><textarea id="th-why" rows="3" maxlength="600" placeholder="Ej. Sus ventas crecen más de 15% al año, su marca le permite subir precios y la quiero para 5 años.">${esc(th.why || '')}</textarea></label>
+    <div class="risk-q">Antes de comprar, ¿puedes marcar estas?</div>
+    <div class="chk-list">${CHECKS.map((c) => `<label class="chk"><input type="checkbox" data-thchk="${c.k}" ${th.checks && th.checks[c.k] ? 'checked' : ''}><span>${esc(c.txt)}</span></label>`).join('')}</div>
+    <div class="two">
+      <label class="field"><span>Precio de entrada</span><input id="th-entry" type="number" inputmode="decimal" step="0.01" min="0" value="${th.entry || (price ? price.toFixed(2) : '')}"></label>
+      <label class="field"><span>Stop (vender si cierra abajo)</span><input id="th-stop" type="number" inputmode="decimal" step="0.01" min="0" value="${stop}"></label>
+    </div>
+    <div class="two">
+      <label class="field"><span>Objetivo (opcional)</span><input id="th-target" type="number" inputmode="decimal" step="0.01" min="0" value="${th.target || ''}"></label>
+      <label class="field"><span>Revisarla cada</span><select id="th-review">${[30, 90, 180].map((d) => `<option value="${d}" ${(th.reviewDays || 90) === d ? 'selected' : ''}>${d} días</option>`).join('')}</select></label>
+    </div>
+    ${R ? `<p class="hint">Stop sugerido: ${money(R.st.stop, cur)} (escenario malo a 1 mes, ${pctS(-R.st.dist)}). Si no marcas todas las casillas, pregúntate si de verdad quieres comprarla.</p>` : ''}
+    <div class="err-msg" id="th-err"></div>
+    <div class="row-btns"><button class="btn ghost" data-action="close-modal">Cancelar</button><button class="btn primary" data-action="thesis-save" data-sym="${esc(sym)}">Guardar tesis</button></div>`);
+}
+
+// ¿Está hoy sobre su media de 200 días? (null si no hay historial suficiente)
+function trendNow(sym) {
+  const a = state.analyses[sym];
+  if (!a || a.error || !(a.tech && a.tech.sma200 > 0)) return null;
+  return (pxOf(sym) || a.price) >= a.tech.sma200;
+}
+
+function saveThesis(sym) {
+  const val = (id) => {
+    const v = parseFloat($(id).value);
+    return isNum(v) && v > 0 ? v : null;
+  };
+  const entry = val('#th-entry');
+  const stop = val('#th-stop');
+  const target = val('#th-target');
+  const err = $('#th-err');
+  if (stop && entry && stop >= entry) { err.textContent = 'El stop debe estar por debajo del precio de entrada.'; return; }
+  if (target && entry && target <= entry) { err.textContent = 'El objetivo debe estar por encima del precio de entrada.'; return; }
+  const checks = {};
+  $$('[data-thchk]').forEach((c) => { checks[c.dataset.thchk] = c.checked; });
+  const prev = state.thesis.get(sym);
+  state.thesis.set(sym, {
+    type: state.thType || 'largo',
+    why: $('#th-why').value.trim().slice(0, 600),
+    checks,
+    entry,
+    stop,
+    target,
+    reviewDays: +$('#th-review').value || 90,
+    lastReview: prev && prev.lastReview ? prev.lastReview : Date.now(),
+    trendAtEntry: prev && prev.trendAtEntry != null ? prev.trendAtEntry : trendNow(sym),
+  });
+  state.thesis.log(sym, { status: 'nota', note: prev ? 'Tesis editada.' : 'Tesis creada.' });
+  closeModal();
+  checkTheses(sym);
+  if (state.detail === sym) renderDetailBody();
+  if (['siguiendo', 'cartera'].includes(state.tab)) renderView();
+  toast({ title: `📝 Tesis de ${sym} guardada`, body: stop ? `Pulso te avisará si cierra bajo ${money(stop, curOf(sym))} o si algo de tu tesis cambia.` : 'Pulso la revisará sola todos los días.', kind: 'info', sym });
+}
+
+function calendarCard(sym) {
+  const a = state.analyses[sym];
+  if (!a || a.error || !usd(sym)) return '';
+  const e = state.earnings[sym];
+  const f = a.fund || {};
+  const dy = isNum(f.divYield) && f.divYield > 0 ? f.divYield : null;
+  let earn;
+  if (!e) earn = '<p class="hint" style="margin-top:0">Buscando la fecha de resultados…</p>';
+  else if (!e.next && e.err) earn = `<p class="hint" style="margin-top:0">Fecha de resultados no disponible (${esc(e.err)}).</p>`;
+  else {
+    const d = e.next ? daysTo(e.next.date) : null;
+    const beats = (e.last || []).filter((x) => isNum(x.actual) && isNum(x.estimate));
+    const nb = beats.filter((x) => x.actual > x.estimate).length;
+    const sp = beats.map((x) => x.surprisePercent).filter(isNum);
+    const avgS = sp.length ? sp.reduce((s, x) => s + x, 0) / sp.length : null;
+    earn = `<div class="ind-grid">
+      <div class="ind"><span>Próximos resultados${e.demo ? ' (demo)' : ''}</span><b>${e.next ? fmtDate(e.next.date) : '—'}</b><small>${d != null ? (d <= 0 ? 'hoy' : `en ${d} día${d === 1 ? '' : 's'}`) : 'sin fecha anunciada'}${e.next && e.next.hour === 'bmo' ? ' · antes de abrir' : e.next && e.next.hour === 'amc' ? ' · después del cierre' : ''}</small></div>
+      <div class="ind"><span>Últimos ${beats.length || ''} trimestres</span><b>${beats.length ? `superó ${nb} de ${beats.length}` : '—'}</b><small>${avgS != null ? `sorpresa promedio ${pct(avgS, 1)}` : ''}</small></div>
+    </div>`;
+  }
+  const div = dy
+    ? `<div class="ind" style="margin-top:8px"><span>Dividendo</span><b>${dy.toFixed(2)}% al año</b><small>con ${money(1000)} invertidos cobrarías ~${money(10 * dy)} al año</small></div>`
+    : '<p class="hint">No paga dividendo (o no hay dato).</p>';
+  return `<section class="card"><h3>📅 Resultados y dividendo</h3>${earn}${div}
+    <p class="hint">Superar la estimación es lo normal (~3 de cada 4 empresas del S&amp;P 500 lo logra); el precio reacciona más a cuánto la supera y a lo que la empresa anticipa. Las fechas exactas del dividendo, consúltalas en tu bróker.</p></section>`;
+}
+
+function earningsList() {
+  const rows = state.follow.map((s) => ({ s, e: state.earnings[s] }))
+    .filter((x) => x.e && x.e.next)
+    .map((x) => ({ ...x, d: daysTo(x.e.next.date) }))
+    .filter((x) => x.d >= 0 && x.d <= 45)
+    .sort((a, b) => a.d - b.d);
+  if (!rows.length) return '';
+  return `<section class="card" style="margin-top:12px"><h3>📅 Próximos resultados</h3>
+    ${rows.map((x) => `<div class="tr-row" data-open="${esc(x.s)}"><b>${esc(x.s)}</b> ${fmtDate(x.e.next.date, { day: 'numeric', month: 'short' })} · <span class="${x.d <= 7 ? 'down' : 'muted'}">${x.d === 0 ? 'hoy' : `en ${x.d} días`}</span>${x.e.demo ? ' <span class="tag">DEMO</span>' : ''}</div>`).join('')}
+    <p class="hint">Cerca de los resultados el precio suele moverse más; si faltan menos de 30 días, Pulso sugiere la mitad del tamaño normal.</p></section>`;
+}
+
+function carteraCard() {
+  const k = killState();
+  return `<a class="card prec-link" href="#/cartera"><b>🧭 Cartera y riesgo</b><span class="muted small">${k.active ? '🛑 Freno de emergencia activado · ' : ''}¿Cuánto comprar?, arma tu portafolio y planea tus aportes →</span></a>`;
+}
+
+
+const VIEWS = { mercado: viewMercado, ranking: viewRanking, siguiendo: viewSiguiendo, noticias: viewNoticias, ajustes: viewAjustes, precision: viewPrecision, cuenta: viewCuenta, cartera: viewCartera };
 
 // ---------------------------------------------------------------------------
 // Renderizado
@@ -1034,6 +1760,7 @@ function flushTicks() {
     }
     paintPrice(sym, q, old);
     Alerts.check(sym, price, meta(sym).n, curOf(sym));
+    if (state.thesis && state.thesis.get(sym)) checkTheses(sym);
     if (state.detail === sym) updateDetailLive(sym);
     // Si el precio se movió más de 1.5% desde el último análisis profundo, se recalcula.
     const dp = state.deep[sym];
@@ -1221,6 +1948,10 @@ function initProvider() {
   state.provider = createProvider(state.settings);
   state.paper = new PaperBook(state.provider.mode);
   state.journal = new SignalJournal(state.provider.mode);
+  state.thesis = new ThesisBook(state.provider.mode);
+  state.earnings = {};
+  state.built = null;
+  earnQueue.clear();
   state.factorRank = null;
   baseCache.clear();
   Object.assign(state, { analyses: {}, quotes: {}, hist: {}, profiles: {}, pulse: null, news: [], companyNews: {}, scanning: false, conn: 'off', deep: {}, raw: {} });
@@ -1316,6 +2047,7 @@ async function runScan({ manual = false } = {}) {
   finishScanFx();
   emitSignalNotifications();
   afterScanPhase1();
+  afterScanPhase2();
 }
 
 function emitSignalNotifications() {
@@ -1476,6 +2208,7 @@ async function openDetail(sym) {
   $('#sheet').scrollTop = 0;
   document.body.classList.add('noscroll');
   renderDetailBody();
+  queueEarnings([sym]);
 
   if (!a || a.error || !state.hist[sym]) {
     await analyzeOne(sym, state.provider, state.token);
@@ -1597,6 +2330,9 @@ function renderDetailBody() {
       <div class="horizon"><span>¿Conviene a corto o largo plazo?</span><b>${esc(v.horizon)}</b></div>
     </section>
     ${deepCard(sym)}
+    ${sizingCard(sym)}
+    ${thesisCard(sym)}
+    ${calendarCard(sym)}
     ${a.events.length ? `<section class="card"><h3>⚡ Eventos técnicos recientes</h3><div class="events">${a.events.map((e) => `<span class="ev ${e.type}">${esc(e.txt)}</span>`).join('')}</div></section>` : ''}
     ${mcHtml}
     <section class="card pc">
@@ -1936,16 +2672,29 @@ async function handleAction(action, el) {
     case 'add-follow': addFollow(sym, el.dataset.name); break;
     case 'bt-run': runUserBacktest(); break;
     case 'bt-stop': state.bt.stop = true; break;
-    case 'paper-open': openTradeModal(sym); break;
+    case 'paper-open': openTradeModal(sym, parseFloat(el.dataset.amt) || null); break;
     case 'paper-buy': {
       const amt = parseFloat($('#paper-amt') && $('#paper-amt').value);
+      if (killState().active && !($('#kill-ok') && $('#kill-ok').checked)) {
+        const er = $('#paper-err');
+        if (er) er.textContent = 'Tu freno de emergencia está activo: marca la casilla si de verdad quieres comprar.';
+        break;
+      }
+      const why = $('#paper-why') ? $('#paper-why').value.trim() : '';
+      const stopV = parseFloat($('#paper-stop') && $('#paper-stop').value);
       const tr = state.paper.buy('manual', sym, amt, pxOf(sym), 'Decisión propia');
       closeModal();
       if (tr) {
         state.paper.snapshot(pxOf, true);
-        toast({ title: `💼 Compraste ${sym} (simulado)`, body: `${tr.qty.toFixed(3)} acciones a ${money(tr.price)}`, kind: 'info' });
+        if (state.thesis && why && !state.thesis.get(sym)) {
+          state.thesis.set(sym, { type: 'largo', why: why.slice(0, 600), checks: {}, entry: +tr.price.toFixed(2), stop: isNum(stopV) && stopV > 0 && stopV < tr.price ? stopV : null, target: null, reviewDays: 90, lastReview: Date.now(), trendAtEntry: trendNow(sym) });
+          state.thesis.log(sym, { status: 'nota', note: 'Tesis creada al comprar.' });
+          checkTheses(sym);
+        }
+        toast({ title: `💼 Compraste ${sym} (simulado)`, body: `${tr.qty.toFixed(3)} acciones a ${money(tr.price)}${why ? ' · tesis guardada' : ''}`, kind: 'info' });
       } else toast({ title: 'No se pudo comprar', body: 'Revisa el monto, el efectivo disponible o que haya precio.', kind: 'info' });
-      if (state.tab === 'cuenta') renderView();
+      if (state.tab === 'cuenta' || state.tab === 'cartera') renderView();
+      if (state.detail === sym) renderDetailBody();
       break;
     }
     case 'paper-sell': {
@@ -1960,13 +2709,39 @@ async function handleAction(action, el) {
     }
     case 'paper-reset': {
       const v = parseFloat($('#paper-start') && $('#paper-start').value) || 10000;
-      if (confirm('¿Reiniciar las 4 cuentas virtuales? Se borran posiciones e historial simulado.')) {
+      if (confirm('¿Reiniciar las 5 cuentas virtuales? Se borran posiciones e historial simulado.')) {
         state.paper.reset(Math.max(100, v));
         afterScanPhase1();
         renderView();
       }
       break;
     }
+    case 'pf-build': {
+      const v = parseFloat($('#pf-amount') && $('#pf-amount').value);
+      if (isNum(v) && v > 0) state.builder.amount = v;
+      save('builder', state.builder);
+      state.built = computeBuilt(state.builder);
+      renderView();
+      break;
+    }
+    case 'pf-apply': applyCartera(); renderView(); break;
+    case 'thesis-edit': openThesisEditor(sym); break;
+    case 'thesis-save': saveThesis(sym); break;
+    case 'thesis-review': {
+      if (!state.thesis.get(sym)) break;
+      state.thesis.set(sym, { lastReview: Date.now() });
+      state.thesis.log(sym, { status: 'nota', note: 'Revisada: la tesis sigue en pie.' });
+      checkTheses(sym);
+      renderDetailBody();
+      toast({ title: `✅ Tesis de ${sym} revisada`, body: `Próxima revisión en ${state.thesis.get(sym).reviewDays || 90} días.`, kind: 'info' });
+      break;
+    }
+    case 'thesis-delete':
+      if (confirm(`¿Borrar tu tesis de ${sym}?`)) {
+        state.thesis.remove(sym);
+        renderDetailBody();
+      }
+      break;
     case 'deep-recalc': {
       const d = computeDeep(sym, { reason: 'manual', notifyChange: false });
       renderDetailBody();
@@ -2060,6 +2835,32 @@ function bindEvents() {
       renderView();
       return;
     }
+    const ct = e.target.closest('[data-ctab]');
+    if (ct) { state.carteraTab = ct.dataset.ctab; save('carteraTab', state.carteraTab); renderView(); return; }
+    const rk = e.target.closest('[data-risk]');
+    if (rk) {
+      state.risk[rk.dataset.risk] = +rk.dataset.val;
+      saveRisk();
+      if (state.built && !state.built.error && rk.dataset.risk === 'maxPos') state.built = computeBuilt(state.builder);
+      renderView();
+      return;
+    }
+    const pfu = e.target.closest('[data-pfu]');
+    if (pfu) { state.builder.universe = pfu.dataset.pfu; save('builder', state.builder); state.built = null; renderView(); return; }
+    const pfm = e.target.closest('[data-pfm]');
+    if (pfm) {
+      state.builder.method = pfm.dataset.pfm;
+      save('builder', state.builder);
+      if (state.built) state.built = computeBuilt(state.builder);
+      renderView();
+      return;
+    }
+    const ply = e.target.closest('[data-ply]');
+    if (ply) { state.planIn.years = +ply.dataset.ply; save('plan', state.planIn); renderView(); return; }
+    const plp = e.target.closest('[data-plp]');
+    if (plp) { state.planIn.preset = plp.dataset.plp; save('plan', state.planIn); renderView(); return; }
+    const tht = e.target.closest('[data-thtype]');
+    if (tht) { state.thType = tht.dataset.thtype; $$('[data-thtype]').forEach((b) => b.classList.toggle('active', b === tht)); return; }
     const pa = e.target.closest('[data-pamt]');
     if (pa) {
       const inp = $('#paper-amt');
@@ -2096,9 +2897,51 @@ function bindEvents() {
   document.addEventListener('input', (e) => {
     if (e.target.id === 'search') onSearch(e.target.value);
     if (e.target.id === 'al-min' || e.target.id === 'al-max') updateAlertProbs();
+    if (e.target.id && e.target.id.startsWith('pl-')) {
+      const I = state.planIn;
+      const v = parseFloat(e.target.value);
+      const map = { 'pl-initial': 'initial', 'pl-monthly': 'monthly', 'pl-goal': 'goal' };
+      if (map[e.target.id]) I[map[e.target.id]] = isNum(v) && v > 0 ? Math.min(v, 1e9) : 0;
+      if (e.target.id === 'pl-ret' && isNum(v)) I.ret = Math.max(-0.05, Math.min(0.25, v / 100));
+      if (e.target.id === 'pl-vol' && isNum(v)) I.vol = Math.max(0.02, Math.min(0.6, v / 100));
+      save('plan', I);
+      clearTimeout(planTimer);
+      planTimer = setTimeout(() => {
+        const box = $('#plan-out');
+        if (box) box.innerHTML = planOut();
+      }, 250);
+    }
   });
 
   document.addEventListener('change', (e) => {
+    if (e.target.id === 'risk-capital') {
+      const v = parseFloat(e.target.value);
+      state.risk.capital = isNum(v) && v > 0 ? v : 0;
+      saveRisk();
+      renderView();
+      return;
+    }
+    if (e.target.dataset.riskflag) { state.risk[e.target.dataset.riskflag] = e.target.checked; saveRisk(); return; }
+    if (e.target.id === 'pf-amount') {
+      const v = parseFloat(e.target.value);
+      state.builder.amount = isNum(v) && v > 0 ? v : 10000;
+      save('builder', state.builder);
+      if (state.built && !state.built.error) { state.built = computeBuilt(state.builder); renderView(); }
+      return;
+    }
+    if (e.target.dataset.pfflag) {
+      state.builder[e.target.dataset.pfflag] = e.target.checked;
+      save('builder', state.builder);
+      if (state.built && !state.built.error) { state.built = computeBuilt(state.builder); renderView(); }
+      return;
+    }
+    if (e.target.dataset.plflag) {
+      state.planIn[e.target.dataset.plflag] = e.target.checked;
+      save('plan', state.planIn);
+      const box = $('#plan-out');
+      if (box) box.innerHTML = planOut();
+      return;
+    }
     const k = e.target.dataset.setting;
     if (!k) return;
     if (k === 'watchMode') { setWatchMode(e.target.checked); return; }

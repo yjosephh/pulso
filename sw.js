@@ -1,5 +1,5 @@
 /* Service worker de Pulso: caché del "cascarón" de la app y notificaciones. */
-const CACHE = 'pulso-v4';
+const CACHE = 'pulso-v5';
 const SHELL = [
   './',
   './index.html',
@@ -15,8 +15,13 @@ const SHELL = [
   './js/metrics.js',
   './js/factors.js',
   './js/paper.js',
+  './js/risk.js',
+  './js/portfolio.js',
+  './js/plan.js',
+  './js/thesis.js',
   './data/factors-ref.json',
   './data/backtest-ref.json',
+  './data/portfolio-ref.json',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',

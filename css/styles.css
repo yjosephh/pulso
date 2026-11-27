@@ -792,3 +792,52 @@ details.card[open] summary { margin-bottom: 12px; }
 .m-table th, .m-table td { font-size: 11.5px; white-space: nowrap; }
 .m-table td:first-child { white-space: normal; font-family: var(--font); color: #cfd7e6; }
 .concl-line { margin: 10px 0 4px; padding: 10px 12px; border-radius: 12px; background: rgba(0, 0, 0, 0.25); font-size: 13px; }
+
+/* ---------- Fase 2: riesgo, portafolio, aportes, tesis y calendario ---------- */
+h4.sub { margin: 16px 0 6px; font-size: 14px; }
+.quick button.on { color: var(--text); border-color: rgba(34, 211, 238, 0.6); background: rgba(34, 211, 238, 0.12); box-shadow: 0 0 12px rgba(34, 211, 238, 0.18); }
+.risk-q { margin: 10px 0 2px; font-size: 12.5px; color: var(--muted); }
+.sbar { display: grid; grid-template-columns: minmax(0, 120px) 1fr 42px; align-items: center; gap: 8px; font-size: 12px; margin: 8px 0; }
+.sbar span { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sbar b { font: 600 12px var(--mono); text-align: right; }
+.sbar-track { position: relative; height: 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.06); }
+.sbar-track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 6px; background: var(--grad); }
+.sbar-track i.over { background: var(--red); }
+.sbar-track em { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--gold); border-radius: 1px; }
+.mlist { display: grid; gap: 8px; }
+.mopt { text-align: left; padding: 11px 12px; border-radius: 13px; border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer; font: inherit; }
+.mopt b { display: block; font-size: 13.5px; }
+.mopt small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; line-height: 1.35; }
+.mopt .ev-mini { display: block; font: 500 11px var(--mono); color: var(--cyan); margin-top: 5px; }
+.mopt.on { border-color: rgba(34, 211, 238, 0.6); background: rgba(34, 211, 238, 0.1); box-shadow: 0 0 14px rgba(34, 211, 238, 0.18); }
+.th-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.th-head h3 { margin: 0; }
+.th-chip { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; background: rgba(255, 255, 255, 0.06); color: var(--muted); white-space: nowrap; }
+.th-chip.good { color: var(--green); background: var(--green-2); }
+.th-chip.warn { color: var(--gold); background: var(--gold-2); }
+.th-chip.bad { color: var(--red); background: var(--red-2); }
+.thesis blockquote { margin: 12px 0 8px; padding: 8px 12px; border-left: 3px solid var(--violet); background: rgba(139, 92, 246, 0.08); border-radius: 0 10px 10px 0; font-size: 13.5px; color: var(--text); }
+.th-meta { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.th-checks { display: flex; flex-direction: column; gap: 3px; margin: 10px 0 2px; font-size: 12.5px; }
+.th-checks .ok { color: #9ff5d3; }
+.th-checks .no { color: var(--dim); }
+.chk-list { display: flex; flex-direction: column; gap: 6px; }
+.chk { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; padding: 9px 10px; border-radius: 11px; background: rgba(0, 0, 0, 0.25); cursor: pointer; line-height: 1.35; }
+.chk input { margin: 1px 0 0; accent-color: var(--cyan); width: 17px; height: 17px; flex: none; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.two .field { margin-bottom: 0; }
+.field textarea {
+  width: 100%; padding: 11px 13px; border-radius: 13px; resize: vertical; min-height: 74px;
+  border: 1px solid var(--border-2); background: rgba(0, 0, 0, 0.35); color: var(--text);
+  font: 400 14px var(--font); outline: none;
+}
+.field textarea:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.15); }
+.w-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.size-card .prec-grid b { font-size: 16px; }
+.plan-in .seg button { padding: 8px 4px; }
+.kill-ok { display: flex; gap: 8px; align-items: center; font-size: 12.5px; margin-top: 10px; color: var(--gold); }
+.kill-ok input { accent-color: var(--gold); width: 16px; height: 16px; }
+@media (max-width: 360px) {
+  .two { grid-template-columns: 1fr; }
+  .sbar { grid-template-columns: minmax(0, 92px) 1fr 38px; }
+}

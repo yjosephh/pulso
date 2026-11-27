@@ -13,6 +13,7 @@ export const ACCOUNTS = {
   manual: { name: 'Mis operaciones', icon: '🧑', desc: 'Lo que tú decides comprar y vender, con dinero simulado.' },
   factors: { name: 'Robot de factores', icon: '📊', desc: 'Cada semana compra el 20% mejor clasificado por el factor validado (si no hay, prueba el candidato más prometedor) y vende lo que sale.' },
   pulso: { name: 'Robot de sugerencias', icon: '🎯', desc: 'Compra en "Compra ahora" y vende en "Vende" (solo las empresas que sigues).' },
+  cartera: { name: 'Mi portafolio', icon: '🧭', desc: 'El portafolio que armaste en Cartera, con el método que elegiste y rebalanceo cada mes.' },
   spy: { name: 'S&P 500 (referencia)', icon: '🏛️', desc: 'Compra el índice el primer día y no lo toca. Es la vara contra la que se mide todo.' },
 };
 
@@ -23,10 +24,15 @@ export class PaperBook {
     this.key = 'paper:' + mode;
     this.s = load(this.key, null);
     if (!this.s || this.s.v !== 1) this.reset(start);
+    else if (!this.s.acc.cartera) {
+      // Cuentas creadas antes de la Fase 2: se agrega "Mi portafolio" vacía.
+      this.s.acc.cartera = { ...blank(this.s.start), last: 0, target: null };
+      this.persist();
+    }
   }
 
   reset(start = 10000) {
-    this.s = { v: 1, created: Date.now(), start, acc: { manual: blank(start), factors: { ...blank(start), last: 0 }, pulso: blank(start), spy: blank(start) } };
+    this.s = { v: 1, created: Date.now(), start, acc: { manual: blank(start), factors: { ...blank(start), last: 0 }, pulso: blank(start), cartera: { ...blank(start), last: 0, target: null }, spy: blank(start) } };
     this.persist();
   }
 
@@ -149,6 +155,33 @@ export class PaperBook {
       if (!(p > 0)) continue;
       const cur = (a.pos[sym] ? a.pos[sym].qty : 0) * p;
       if (per - cur > per * 0.1) this.buy('factors', sym, per - cur, p, `Entra al top 20% (${label})`);
+    }
+    a.last = Date.now();
+    this.persist();
+    return true;
+  }
+
+  // Lleva una cuenta a los pesos objetivo { SYM: peso }: primero vende lo que sobra
+  // y después compra lo que falta (ignora diferencias menores al 5% del objetivo).
+  rebalanceWeights(id, weights, px, label) {
+    const a = this.acc(id);
+    const syms = Object.keys(weights).filter((s) => weights[s] > 0 && px(s) > 0);
+    if (!syms.length) return false;
+    for (const sym of Object.keys(a.pos)) {
+      if (!syms.includes(sym)) {
+        const p = px(sym);
+        if (p > 0) this.sell(id, sym, null, p, `Sale del portafolio (${label})`);
+      }
+    }
+    const V = this.value(id, px);
+    const cur = (sym) => (a.pos[sym] ? a.pos[sym].qty : 0) * px(sym);
+    for (const sym of syms) {
+      const tgt = weights[sym] * V;
+      if (cur(sym) - tgt > Math.max(1, tgt * 0.05)) this.sell(id, sym, (cur(sym) - tgt) / px(sym), px(sym), `Ajuste de peso (${label})`);
+    }
+    for (const sym of syms) {
+      const tgt = weights[sym] * V;
+      if (tgt - cur(sym) > Math.max(1, tgt * 0.05)) this.buy(id, sym, tgt - cur(sym), px(sym), `Rebalanceo (${label})`);
     }
     a.last = Date.now();
     this.persist();

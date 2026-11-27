@@ -231,3 +231,47 @@ export function equityChart(series, { h = 180 } = {}) {
     ${lines}
   </svg>`;
 }
+
+// Abanico del plan de aportes: escenarios año por año contra lo que aportaste.
+export function planChart(plan, { cur = '$', goal = 0 } = {}) {
+  const W = 340;
+  const H = 200;
+  const pl = 4;
+  const pr = 78;
+  const pt = 12;
+  const pb = 22;
+  const pts = plan.fan;
+  const Y = pts[pts.length - 1].y || 1;
+  const hi = Math.max(...pts.map((p) => p.p95), goal || 0) * 1.06 || 1;
+  const x = (y) => pl + (y / Y) * (W - pl - pr);
+  const yy = (v) => pt + (1 - v / hi) * (H - pt - pb);
+  const band = (a, b) =>
+    pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.y).toFixed(1)} ${yy(p[a]).toFixed(1)}`).join(' ') + ' ' +
+    pts.slice().reverse().map((p) => `L${x(p.y).toFixed(1)} ${yy(p[b]).toFixed(1)}`).join(' ') + ' Z';
+  const line = (k) => pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.y).toFixed(1)} ${yy(p[k]).toFixed(1)}`).join(' ');
+  const fmt = (v) => cur + (v >= 1e6 ? (v / 1e6).toFixed(2) + 'M' : v >= 1e4 ? Math.round(v / 1000) + 'k' : Math.round(v).toLocaleString('en-US'));
+  const lp = pts[pts.length - 1];
+  // Etiquetas a la derecha sin encimarse.
+  const labels = [[lp.p95, C.green, '95%'], [lp.p50, '#fff', 'Típ'], [lp.contrib, C.gold, 'Tú'], [lp.p5, C.red, ' 5%']]
+    .map(([v, col, t]) => ({ y: yy(v) + 4, v, col, t }))
+    .sort((a, b) => a.y - b.y);
+  for (let i = 1; i < labels.length; i++) if (labels[i].y - labels[i - 1].y < 11) labels[i].y = labels[i - 1].y + 11;
+  const id = nextId('plan');
+  const goalLine = goal > 0 && goal < hi
+    ? `<line x1="${pl}" x2="${W - pr}" y1="${yy(goal).toFixed(1)}" y2="${yy(goal).toFixed(1)}" stroke="${C.cyan}" stroke-dasharray="5 4" stroke-width="1.2"/>
+       <text x="${pl + 4}" y="${(yy(goal) - 4).toFixed(1)}" fill="${C.cyan}" font-size="9.5" font-family="JetBrains Mono, monospace">Meta ${fmt(goal)}</text>`
+    : '';
+  return `<svg class="fan" viewBox="0 0 ${W} ${H}" role="img" aria-label="Escenarios del plan de aportes">
+    <defs><linearGradient id="${id}" x1="0" x2="1"><stop offset="0" stop-color="${C.violet}" stop-opacity=".06"/><stop offset="1" stop-color="${C.violet}" stop-opacity=".3"/></linearGradient>
+    <linearGradient id="${id}b" x1="0" x2="1"><stop offset="0" stop-color="${C.cyan}" stop-opacity=".1"/><stop offset="1" stop-color="${C.cyan}" stop-opacity=".42"/></linearGradient></defs>
+    ${[0.25, 0.5, 0.75].map((g) => `<line x1="${pl}" x2="${W - pr}" y1="${pt + g * (H - pt - pb)}" y2="${pt + g * (H - pt - pb)}" stroke="${C.grid}"/>`).join('')}
+    <path d="${band('p95', 'p5')}" fill="url(#${id})"/>
+    <path d="${band('p75', 'p25')}" fill="url(#${id}b)"/>
+    <path d="${line('contrib')}" fill="none" stroke="${C.gold}" stroke-width="1.6" stroke-dasharray="4 3"/>
+    <path d="${line('p50')}" fill="none" stroke="#fff" stroke-width="2"/>
+    ${goalLine}
+    ${labels.map((l) => `<text x="${W - pr + 6}" y="${l.y.toFixed(1)}" fill="${l.col}" font-size="10" font-family="JetBrains Mono, monospace">${l.t} ${fmt(l.v)}</text>`).join('')}
+    <text x="${pl}" y="${H - 6}" fill="${C.text}" font-size="10" font-family="Space Grotesk, sans-serif">Hoy</text>
+    <text x="${W - pr}" y="${H - 6}" text-anchor="end" fill="${C.text}" font-size="10" font-family="Space Grotesk, sans-serif">${Y} año${Y === 1 ? '' : 's'}</text>
+  </svg>`;
+}

@@ -78,7 +78,7 @@ function bollinger(c, n = 20, k = 2) {
   return { mid, upper: mid + k * sd, lower: mid - k * sd };
 }
 
-function volatility(c, n = 252) {
+export function volatility(c, n = 252) {
   const w = c.slice(-(n + 1));
   const rets = [];
   for (let i = 1; i < w.length; i++) rets.push(Math.log(w[i] / w[i - 1]));

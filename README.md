@@ -23,6 +23,9 @@ cuando una acción llega al precio que tú marques.
 | **📏 Precisión medida** | Prueba histórica: las mismas reglas aplicadas semana a semana a 10 años de precios reales (sin ver el futuro) y comparadas con lo que pasó. Muestra si cada sugerencia acierta más que el azar, si los rangos están calibrados y si seguirlas gana más que comprar y mantener. Con tus claves puedes repetirla desde la app. |
 | **📊 Ranking por factores** | Ordena tus empresas por un factor (tendencia de 12 meses, baja volatilidad, rebote…) **solo si pasó la prueba fuera de muestra**. Hoy ninguno la pasó, así que la app lo dice en vez de mostrar un ranking "para comprar". |
 | **💼 Cuenta virtual** | Dinero simulado con precios reales y costos (0.05% comisión + 0.05% deslizamiento): tus operaciones, un robot de factores, un robot que sigue las sugerencias y el S&P 500 como referencia, con métricas completas. Nunca se conecta a un bróker. |
+| **🧭 Cartera y riesgo** | **¿Cuánto comprar?** según tu perfil (pérdida máxima por operación, máximo por empresa y por sector), stop de cierre en el escenario malo a 1 mes con su probabilidad **medida**, freno de emergencia si tu cuenta cae, armador de portafolio (partes iguales, paridad de riesgo, mínima varianza, HRP) con acciones a comprar, y plan de aportes mensuales con 5,000 escenarios. |
+| **📝 Tesis por empresa** | Escribes por qué compras, tu stop, tu objetivo y cada cuánto revisarla; Pulso la revisa sola (stop, objetivo, resultados, noticias muy negativas, tendencia) y te avisa si se rompe. |
+| **📅 Resultados y dividendo** | Fecha de los próximos resultados (Finnhub), cuántas veces superó la estimación y dividendo anual. Si faltan menos de 30 días, sugiere la mitad del tamaño. |
 | **📓 Diario de señales** | Cada sugerencia queda registrada con su precio y a los 5 días hábiles se anota si acertó: la prueba en vivo, sin trampa posible. |
 | **Noticias** | Noticias del mercado y de tus empresas con sentimiento automático (positiva/negativa/neutral). |
 | **🔔 Notificaciones** | Señales nuevas de COMPRA/VENTA, eventos técnicos (cruce dorado, MACD, RSI) y alertas de precio, con sonido y vibración. |
@@ -116,6 +119,25 @@ corrección por pruebas múltiples (Benjamini-Hochberg) y simulación de comprar
 Conclusión honesta: los rangos de riesgo son confiables; las sugerencias de compra/venta y los factores, todavía no.
 La prueba solo mide las reglas técnicas y la simulación (no hay historial gratuito de fundamentales y noticias).
 
+## 🧭 Prueba de portafolio y stops (Fase 2)
+
+Mismo código de la app, rebalanceo mensual con solo el último año de datos de cada fecha, costo 0.1% por operación.
+
+| 104 grandes empresas, 2016–2026 | Al año | Volatilidad | Sharpe | Peor caída |
+|---|---|---|---|---|
+| Partes iguales | 17.8% | 17.6% | 1.02 | −34% |
+| Paridad de riesgo simple | 15.8% | 16.5% | 0.97 | −33% |
+| HRP | 13.5% | 15.2% | 0.91 | −32% |
+| Mínima varianza | 9.7% | 13.8% | 0.74 | −32% |
+| S&P 500 | 14.3% | 18.0% | 0.84 | −34% |
+
+- Los optimizadores **sí bajan la volatilidad** (de forma confiable), pero **también la ganancia**, y ninguno mejoró el
+  Sharpe: repartir en partes iguales sigue siendo la opción a vencer. En el COVID casi no protegieron; en 2022 sí.
+- **Stops** (escenario malo a 1 mes, revisado al cierre): no mejoraron la ganancia (−0.3% al año, de −1.7% a +1.5%).
+  Sirven para acotar la pérdida por operación (la real fue 1.11× la planeada en promedio) y para calcular cuánto comprar.
+- La fórmula decía que el stop se tocaría 8% de las veces en un mes; **pasó 10.2%** (14% en acciones tranquilas,
+  6% en las volátiles). La app muestra la cifra medida, no la de la fórmula.
+
 ## ⚠️ Limitaciones (siendo sinceros)
 
 - **Alertas con la app cerrada:** las alertas son instantáneas mientras Pulso está abierta o en segundo plano
@@ -144,6 +166,14 @@ pulso/
 └── js/
     ├── app.js            # Pantallas, navegación, escaneo, alertas
     ├── analysis.js       # Indicadores, puntajes, veredicto, Monte Carlo
+    ├── risk.js           # Stop, tamaño de posición, freno de emergencia
+    ├── portfolio.js      # Ledoit-Wolf, mínima varianza, HRP, acciones a comprar
+    ├── plan.js           # Plan de aportes (Monte Carlo con rachas de crisis)
+    ├── thesis.js         # Tesis por empresa y sus revisiones automáticas
+    ├── paper.js          # Cuenta virtual y diario de señales
+    ├── factors.js        # Estudio de factores
+    ├── backtest.js       # Prueba histórica de las reglas
+    ├── metrics.js        # Sharpe, Sortino, bootstrap, Benjamini-Hochberg
     ├── data.js           # Proveedores: Demo, Finnhub, Twelve Data
     ├── charts.js         # Velas, medidor, anillos, abanico
     ├── notify.js         # Notificaciones, sonido y alertas de precio
