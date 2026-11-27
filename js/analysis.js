@@ -299,6 +299,7 @@ export function analyze({ meta, history, quote, fund, rec, news }) {
     t.macd = last(m.line);
     t.macdSignal = last(m.signal);
     t.macdHist = last(m.hist);
+    t.macdHistPrev = m.hist[m.hist.length - 2];
     t.bb = bollinger(closes);
     t.vol = volatility(closes);
     t.mdd = maxDrawdown(closes);
@@ -566,4 +567,230 @@ export function marketPulse(analyses, sectorList) {
     `El modelo detecta ${buys} señal${buys === 1 ? '' : 'es'} de compra y ${sells} de venta.`;
 
   return { score, label, above50, above200, avgRsi, posMom, avgChg, avgNews, sectors, best, worst, buys, sells, summary, count: list.length };
+}
+
+// ---------------------------------------------------------------------------
+// ANÁLISIS PROFUNDO (empresas en seguimiento)
+// 10,000+ escenarios con impacto de noticias de último momento.
+// El "margen de error" medido es el de la SIMULACIÓN (precisión del cálculo),
+// no el del precio futuro: ningún modelo predice el mercado con 1% de error.
+// ---------------------------------------------------------------------------
+
+// Choques con "colas gruesas" (t de Student, 4 grados de libertad) escalados a
+// varianza 1: las caídas y subidas bruscas son más realistas que con la normal.
+function studentT(rng, df = 4) {
+  const z = gaussFrom(rng);
+  let c = 0;
+  for (let i = 0; i < df; i++) {
+    const g = gaussFrom(rng);
+    c += g * g;
+  }
+  return (z / Math.sqrt(c / df)) * Math.sqrt((df - 2) / df);
+}
+
+// Sentimiento de las noticias de las últimas 72 h, pesando más las recientes.
+export function newsImpact(items, now = Date.now()) {
+  const nowS = now / 1000;
+  const recent = (items || []).filter((n) => n && n.datetime && nowS - n.datetime < 72 * 3600 && nowS - n.datetime > -3600);
+  const out = { score: 0, count: recent.length, fresh: 0, pos: 0, neg: 0, latest: null };
+  if (!recent.length) return out;
+  let sw = 0;
+  let ws = 0;
+  for (const n of recent) {
+    const age = Math.max(0, (nowS - n.datetime) / 3600);
+    const w = Math.exp(-age / 24);
+    const s = sentiment(n.headline + ' ' + (n.summary || ''));
+    sw += w;
+    ws += w * s;
+    if (s > 0.1) out.pos++;
+    else if (s < -0.1) out.neg++;
+    if (age < 24) out.fresh++;
+  }
+  out.score = ws / sw;
+  out.latest = recent.slice().sort((a, b) => b.datetime - a.datetime)[0];
+  return out;
+}
+
+function summarize(arr, price) {
+  const s = arr.slice().sort();
+  const q = (x) => s[Math.min(s.length - 1, Math.floor(x * s.length))];
+  let up = 0;
+  for (let i = 0; i < arr.length; i++) if (arr[i] > price) up++;
+  return { p5: q(0.05), p25: q(0.25), p50: q(0.5), p75: q(0.75), p95: q(0.95), probUp: up / arr.length };
+}
+
+// Margen de error (95%) de la mediana por el método de lotes.
+function batchMoe(arr, B = 20) {
+  const n = Math.floor(arr.length / B);
+  const meds = [];
+  for (let b = 0; b < B; b++) {
+    const s = arr.slice(b * n, (b + 1) * n).sort();
+    meds.push(s[Math.floor(n / 2)]);
+  }
+  const m = meds.reduce((x, y) => x + y, 0) / B;
+  const sd = Math.sqrt(meds.reduce((x, y) => x + (y - m) ** 2, 0) / (B - 1));
+  return (1.96 * sd) / Math.sqrt(B) / m;
+}
+
+function runDeep({ price, mu, muNews, sigma, N, seed }) {
+  const rng = mulberry32(seed);
+  const dt = 1 / 252;
+  const sd = sigma * Math.sqrt(dt);
+  const v1 = new Float64Array(N);
+  const v5 = new Float64Array(N);
+  const v21 = new Float64Array(N);
+  const lo5 = new Float64Array(N);
+  const hi5 = new Float64Array(N);
+  // El efecto de las noticias se desvanece en unos días (vida media ~3 días).
+  const drifts = [];
+  for (let d = 1; d <= 21; d++) drifts.push((mu + muNews * Math.exp(-(d - 1) / 4) - 0.5 * sigma * sigma) * dt);
+  for (let p = 0; p < N; p++) {
+    let s = price;
+    let lo = price;
+    let hi = price;
+    for (let d = 1; d <= 21; d++) {
+      s *= Math.exp(drifts[d - 1] + sd * studentT(rng));
+      if (d <= 5) {
+        if (s < lo) lo = s;
+        if (s > hi) hi = s;
+      }
+      if (d === 1) v1[p] = s;
+      else if (d === 5) {
+        v5[p] = s;
+        lo5[p] = lo;
+        hi5[p] = hi;
+      }
+    }
+    v21[p] = s;
+  }
+  const h = { 1: summarize(v1, price), 5: summarize(v5, price), 21: summarize(v21, price) };
+  const probMoe = Math.max(...[1, 5, 21].map((k) => 1.96 * Math.sqrt((h[k].probUp * (1 - h[k].probUp)) / N)));
+  const medMoe = Math.max(batchMoe(v1), batchMoe(v5), batchMoe(v21));
+  const loS = lo5.slice().sort();
+  const hiS = hi5.slice().sort();
+  return {
+    N,
+    h,
+    moe: Math.max(probMoe, medMoe),
+    probMoe,
+    medMoe,
+    low5: loS[Math.floor(N / 2)],
+    high5: hiS[Math.floor(N / 2)],
+  };
+}
+
+export function deepAnalysis(a, news, { paths = 10000, maxPaths = 40000, maxMoe = 0.01 } = {}) {
+  if (!a || a.error || !isNum(a.price) || !isNum(a.tech.vol)) return null;
+  const price = a.price;
+  const { mu, sigma } = mcParams(a);
+  const ni = newsImpact(news);
+  const intensity = Math.min(1, ni.fresh / 3 + ni.count / 12);
+  // Noticias positivas/negativas inclinan la tendencia de corto plazo y,
+  // si son fuertes, aumentan la volatilidad esperada.
+  const muNews = clamp(ni.score * 1.2 * (0.4 + 0.6 * intensity), -1.2, 1.2);
+  const sigmaEff = sigma * (1 + 0.35 * Math.abs(ni.score) * (0.3 + 0.7 * intensity));
+  const seed = hashStr(a.sym + ':' + price.toFixed(2) + ':' + ni.count + ':' + isoDate());
+
+  // Si el margen de error supera el 1%, duplicamos los escenarios (hasta 40,000).
+  let N = paths;
+  let sim;
+  for (;;) {
+    sim = runDeep({ price, mu, muNews, sigma: sigmaEff, N, seed });
+    if (sim.moe <= maxMoe || N >= maxPaths) break;
+    N = Math.min(maxPaths, N * 2);
+  }
+  let newsWeek = 0;
+  for (let d = 1; d <= 5; d++) newsWeek += (muNews * Math.exp(-(d - 1) / 4)) / 252;
+
+  const d = { sym: a.sym, price, cur: a.cur, ...sim, news: ni, params: { mu, muNews, sigma, sigmaEff, newsWeek } };
+  d.rec = recommend(a, d);
+  return d;
+}
+
+const REC_META = {
+  'buy-now': { emoji: '🟢', label: 'COMPRA AHORA', kind: 'buy' },
+  'buy-wait': { emoji: '🟡', label: 'PREFERIBLE ESPERAR UNOS DÍAS PARA COMPRAR', kind: 'info' },
+  'sell-wait': { emoji: '🟠', label: 'VENDE EN UNOS DÍAS', kind: 'info' },
+  'sell-now': { emoji: '🔴', label: 'VENDE AHORA', kind: 'sell' },
+  hold: { emoji: '⚪', label: 'MANTÉN Y VIGILA', kind: 'info' },
+};
+
+function recommend(a, d) {
+  const t = a.tech;
+  const p = a.price;
+  const m$ = (v) => a.cur + (v >= 10000 ? Math.round(v).toLocaleString('en-US') : v.toFixed(2));
+  const pc = (v) => (v >= 0 ? '+' : '') + (v * 100).toFixed(1) + '%';
+  const h5 = d.h[5];
+  const up5 = h5.probUp;
+  const med5 = h5.p50 / p - 1;
+  const bb = t.bb;
+  const bbPos = bb && bb.upper > bb.lower ? (p - bb.lower) / (bb.upper - bb.lower) : 0.5;
+  const rsiV = isNum(t.rsi) ? t.rsi : 50;
+  const macdUp = isNum(t.macdHist) && isNum(t.macdHistPrev) ? t.macdHist > t.macdHistPrev : null;
+  const ns = d.news.count ? d.news.score : 0;
+  const low = bbPos < 0.3 || rsiV < 40;
+  const high = bbPos > 0.8 || rsiV > 65;
+  const longS = a.scoreLong;
+
+  const reasons = [
+    { k: 'rsi', txt: `RSI ${rsiV.toFixed(0)} (${rsiV < 40 ? 'bajo' : rsiV > 65 ? 'alto' : 'medio'})`, dir: rsiV < 40 ? 1 : rsiV > 65 ? -1 : 0 },
+    { k: 'zone', txt: `Precio en zona ${bbPos < 0.3 ? 'baja' : bbPos > 0.8 ? 'alta' : 'media'} de su rango de 20 días`, dir: bbPos < 0.3 ? 1 : bbPos > 0.8 ? -1 : 0 },
+  ];
+  if (macdUp != null) reasons.push({ k: 'macd', txt: macdUp ? 'Impulso (MACD) girando al alza' : 'Impulso (MACD) perdiendo fuerza', dir: macdUp ? 1 : -1 });
+  if (d.news.count) reasons.push({ k: 'news', txt: `Noticias 72 h: ${ns > 0.1 ? 'positivas' : ns < -0.1 ? 'negativas' : 'neutrales'} (${d.news.count})`, dir: ns > 0.1 ? 1 : ns < -0.1 ? -1 : 0 });
+  reasons.push({ k: 'mc', txt: `Prob. de subir en 1 semana: ${Math.round(up5 * 100)}%`, dir: up5 > 0.52 ? 1 : up5 < 0.48 ? -1 : 0 });
+  reasons.push({ k: 'long', txt: `Largo plazo ${longS}/100`, dir: longS >= 60 ? 1 : longS < 45 ? -1 : 0 });
+
+  let code;
+  let weak = false;
+  if (high && (up5 < 0.48 || ns < -0.2 || (macdUp === false && rsiV > 70))) code = 'sell-now';
+  else if (longS < 40 && a.scoreShort < 35 && ns <= 0 && !low) {
+    code = 'sell-now';
+    weak = true;
+  } else if (high && macdUp !== false && up5 >= 0.48) code = 'sell-wait';
+  else if (low && longS >= 55 && (macdUp === true || up5 >= 0.52) && ns > -0.15) code = 'buy-now';
+  else if (bbPos < 0.55 && longS >= 45 && (med5 < 0 || ns < -0.15 || macdUp === false)) code = 'buy-wait';
+  else code = 'hold';
+
+  const shortR = reasons.filter((r) => r.k !== 'long');
+  let agree;
+  if (code === 'buy-now') agree = reasons.filter((r) => r.dir === 1).length;
+  else if (code === 'sell-now') agree = reasons.filter((r) => r.dir === -1).length;
+  else if (code === 'buy-wait') agree = shortR.filter((r) => r.dir === -1).length + (longS >= 55 ? 1 : 0) + (low ? 1 : 0);
+  else if (code === 'sell-wait') agree = shortR.filter((r) => r.dir === 1 && r.k !== 'rsi' && r.k !== 'zone').length + (high ? 1 : 0);
+  else agree = 3;
+  const confidence = agree >= 4 ? 'Alta' : agree >= 3 ? 'Media' : 'Baja';
+
+  let text;
+  let target;
+  let targetLabel;
+  if (code === 'buy-now') {
+    target = h5.p50;
+    targetLabel = 'Más probable en 1 semana';
+    text = `El precio está bajo y el impulso empieza a girar a favor${ns > 0.1 ? ', con noticias positivas' : ''}. En 1 semana el escenario más probable es ${m$(h5.p50)} (${pc(med5)}).`;
+  } else if (code === 'buy-wait') {
+    target = d.low5;
+    targetLabel = 'Posible piso en los próximos días';
+    text = `El precio todavía podría bajar${ns < -0.15 ? ' (las noticias recientes son negativas)' : macdUp === false ? ' (el impulso sigue perdiendo fuerza)' : ''}. El modelo estima un piso cercano a ${m$(d.low5)} (${pc(d.low5 / p - 1)}) en los próximos días; esperar a que se estabilice ahí sería mejor punto de compra.`;
+  } else if (code === 'sell-wait') {
+    target = d.high5;
+    targetLabel = 'Posible techo en los próximos días';
+    text = `Está en zona alta, pero el impulso sigue a favor: podría subir hasta cerca de ${m$(d.high5)} (${pc(d.high5 / p - 1)}) en los próximos días. Si tienes acciones, el modelo sugiere vender en unos días, cerca de ese nivel.`;
+  } else if (code === 'sell-now') {
+    target = h5.p25;
+    targetLabel = 'Escenario bajista en 1 semana';
+    text = weak
+      ? `Tendencia bajista y fundamentales débiles${ns < -0.1 ? ', con noticias negativas' : ''}. Si tienes acciones, el modelo sugiere vender ahora: la probabilidad de subir en 1 semana es de ${Math.round(up5 * 100)}%.`
+      : `Está en zona alta y las señales se están volteando${ns < -0.1 ? ' (noticias negativas)' : ''}. El riesgo de bajada supera al potencial de subida (prob. de subir en 1 semana: ${Math.round(up5 * 100)}%). Si tienes acciones, el modelo sugiere vender ahora.`;
+  } else {
+    target = h5.p50;
+    targetLabel = 'Más probable en 1 semana';
+    const zone = high
+      ? 'Está en zona alta, pero las señales no coinciden: no es buen precio para comprar y tampoco hay motivo claro para vender.'
+      : low
+        ? 'Está en zona baja, pero todavía no hay señales claras de rebote.'
+        : 'El precio está en zona media y las señales no coinciden.';
+    text = `${zone} El modelo no ve ventaja clara hoy; escenario más probable en 1 semana: ${m$(h5.p50)} (${pc(med5)}).`;
+  }
+  return { code, ...REC_META[code], text, target, targetLabel, confidence, reasons };
 }

@@ -273,13 +273,30 @@ export class DemoProvider {
     };
   }
 
-  async getCompanyNews(sym) {
+  async getCompanyNews(sym, opts = {}) {
     const m = this.meta(sym);
     const rng = mulberry32(hashStr('cn' + sym + isoDate()));
     const now = Date.now() / 1000;
     const out = [];
     for (let i = 0; i < 6; i++) out.push(this.makeNews(m, rng, now, sym + i));
-    return out.sort((a, b) => b.datetime - a.datetime);
+    // Demo: de vez en cuando aparece una noticia "de último momento".
+    this.breaking = this.breaking || {};
+    if (opts.fresh && Math.random() < 0.15) {
+      const good = Math.random() < 0.5 + m.drift;
+      const pool = good ? POS_T : NEG_T;
+      const h = pool[Math.floor(Math.random() * pool.length)].replace('{n}', m.n);
+      (this.breaking[sym] = this.breaking[sym] || []).unshift({
+        id: 'b' + Date.now() + sym,
+        headline: '⚡ ' + h,
+        summary: 'Noticia de último momento simulada (modo demo).',
+        source: 'Pulso Demo',
+        url: '',
+        datetime: Math.round(now),
+        related: sym,
+        demo: true,
+      });
+    }
+    return [...(this.breaking[sym] || []), ...out].sort((a, b) => b.datetime - a.datetime);
   }
 
   async getMarketStatus() {
@@ -473,9 +490,9 @@ export class LiveProvider {
     return out;
   }
 
-  async getCompanyNews(sym) {
+  async getCompanyNews(sym, opts = {}) {
     const ck = 'n:' + sym;
-    const hit = cacheGet(ck, 30 * 60e3);
+    const hit = cacheGet(ck, opts.fresh ? 4 * 60e3 : 30 * 60e3);
     if (hit) return hit;
     const to = isoDate();
     const from = isoDate(new Date(Date.now() - 7 * DAY));

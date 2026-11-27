@@ -1,5 +1,5 @@
 /* Service worker de Pulso: caché del "cascarón" de la app y notificaciones. */
-const CACHE = 'pulso-v1';
+const CACHE = 'pulso-v2';
 const SHELL = [
   './',
   './index.html',

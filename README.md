@@ -19,6 +19,7 @@ cuando una acción llega al precio que tú marques.
 | **🔍 Botón central** | Ejecuta el análisis completo del mercado (técnico + fundamentales + analistas + noticias + 58,000 simulaciones). |
 | **Detalle de empresa** | Gráfica de velas con medias de 50 y 200 días, veredicto honesto ("Pinta bien", "Mala idea por ahora"…), si conviene a corto o largo plazo, abanico de 1,000 escenarios, lo bueno y lo malo, indicadores, consenso de analistas y noticias. |
 | **Siguiendo** | Tus empresas con precio en vivo, alertas de precio mínimo/máximo, probabilidad de que toquen tu precio, y "Modo vigilancia" (mantiene la pantalla encendida). |
+| **🎯 Análisis profundo** | Para las empresas que sigues: 10,000 escenarios con el efecto de las noticias de último momento. Se recalcula solo cuando sale una noticia o el precio se mueve más de 1.5%. Te dice **Compra ahora / Preferible esperar unos días para comprar / Vende en unos días / Vende ahora / Mantén**, con cuánto podría bajar o subir mañana, en 1 semana y en 1 mes. |
 | **Noticias** | Noticias del mercado y de tus empresas con sentimiento automático (positiva/negativa/neutral). |
 | **🔔 Notificaciones** | Señales nuevas de COMPRA/VENTA, eventos técnicos (cruce dorado, MACD, RSI) y alertas de precio, con sonido y vibración. |
 
@@ -86,6 +87,9 @@ límites gratuitos; después usa caché y es rápido.
   precios y mande notificaciones push (siguiente fase).
 - **Samsung** cotiza en la bolsa de Corea; los planes gratuitos normalmente no incluyen esos datos.
 - **Modo demo** usa precios y noticias simulados (marcados como DEMO). No los uses para decidir.
+- **Margen de error de 1%:** se refiere a la precisión de la simulación (con 10,000 escenarios, las probabilidades
+  y precios estimados varían ±1% o menos si se repite el cálculo). No significa que el precio real vaya a quedar a
+  ±1% de lo estimado: eso no lo puede lograr ningún modelo. Por eso la app muestra el rango completo.
 - **El modelo puede equivocarse**, sobre todo ante noticias inesperadas. Las simulaciones muestran escenarios
   posibles según la volatilidad pasada, no el futuro.
 

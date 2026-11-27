@@ -1,7 +1,7 @@
 // PULSO · aplicación principal
 import { UNIVERSE, INDICES, SECTORS, sectorName } from './universe.js';
 import { createProvider, LiveProvider, isoDate, hashStr } from './data.js';
-import { analyze, marketPulse, simulate, sma, sentiment } from './analysis.js';
+import { analyze, marketPulse, simulate, sma, sentiment, deepAnalysis } from './analysis.js';
 import { sparkline, gauge, ring, fanChart, priceChart } from './charts.js';
 import {
   notify, Alerts, configureNotify, unlockAudio, notifPermission, notifSupported,
@@ -72,6 +72,9 @@ const state = {
   watchMode: false,
   wakeLock: null,
   manualScan: false,
+  deep: {},
+  raw: {},
+  newsSeen: load('newsSeen', {}),
 };
 configureNotify({ sound: state.settings.sound });
 
@@ -255,14 +258,14 @@ function viewSiguiendo() {
         ${al && (al.minFired || al.maxFired) ? `<button class="btn sm" data-action="rearm" data-sym="${esc(sym)}">↺ Rearmar</button>` : ''}
         <button class="btn sm primary" data-action="alert" data-sym="${esc(sym)}">🔔 Alerta</button>
         <button class="btn sm ghost" data-action="unfollow" data-sym="${esc(sym)}" aria-label="Dejar de seguir">✕</button></div>
-      ${a && !a.error ? `<div class="w-verdict tone-${a.verdict.tone}">${a.verdict.emoji} <b>${esc(a.verdict.title)}</b> · Horizonte: ${esc(a.verdict.horizon)} · ${sigBadge(a)}</div>` : ''}
+      ${state.deep[sym] ? deepMini(sym) : a && !a.error ? `<div class="w-verdict tone-${a.verdict.tone}">${a.verdict.emoji} <b>${esc(a.verdict.title)}</b> · Horizonte: ${esc(a.verdict.horizon)} · ${sigBadge(a)}</div>` : ''}
       ${prob}
     </article>`;
   }).join('');
 
   const wl = 'wakeLock' in navigator;
   return `
-    <div class="page-head"><h2>En seguimiento</h2><p>Precios en vivo y alertas instantáneas de precio</p></div>
+    <div class="page-head"><h2>En seguimiento</h2><p>Noticias en vivo · 10,000 escenarios por empresa · alertas instantáneas</p></div>
     <div class="card search">
       <input id="search" type="search" placeholder="🔍 Buscar empresa para seguir (ej. Tesla, KO)" autocomplete="off" enterkeyhint="search">
       <div id="search-res" class="search-res"></div>
@@ -356,6 +359,7 @@ function viewAjustes() {
         <p><b>3. Analistas:</b> consenso de recomendaciones de Wall Street.</p>
         <p><b>4. Noticias:</b> sentimiento automático de titulares recientes (positivo/negativo).</p>
         <p><b>5. Monte Carlo:</b> 1,000 escenarios de precio a 1 mes y 1,000 a 1 año por empresa, usando su volatilidad histórica y un rendimiento esperado conservador (encogido hacia ~8% anual para no extrapolar rachas).</p>
+        <p><b>6. Análisis profundo (empresas que sigues):</b> 10,000 escenarios con choques de "colas gruesas" (caídas y subidas bruscas realistas) y el efecto de las noticias de las últimas 72 h. Se recalcula al salir una noticia nueva o si el precio se mueve más de 1.5%. Da la sugerencia (compra ahora / espera unos días / vende en unos días / vende ahora / mantén) y el rango de cuánto podría bajar o subir mañana, en 1 semana y en 1 mes. El margen de error de la simulación se mantiene en ±1% o menos.</p>
         <p>Todo se combina en un <b>puntaje de corto plazo</b> (señal COMPRA/MANTENER/VENTA) y uno de <b>largo plazo</b>, más un veredicto honesto con lo bueno y lo malo. Es un modelo: puede equivocarse, sobre todo ante noticias inesperadas.</p>
       </div>
     </details>
@@ -467,8 +471,172 @@ function flushTicks() {
     paintPrice(sym, q, old);
     Alerts.check(sym, price, meta(sym).n, curOf(sym));
     if (state.detail === sym) updateDetailLive(sym);
+    // Si el precio se movió más de 1.5% desde el último análisis profundo, se recalcula.
+    const dp = state.deep[sym];
+    if (dp && state.follow.includes(sym) && Math.abs(price / dp.price - 1) > 0.015 && Date.now() - dp.at > 60e3) {
+      computeDeep(sym, { reason: 'price' });
+      if (state.detail === sym) renderDetailBody();
+      if (state.tab === 'siguiendo') scheduleRender();
+    }
   }
   pending.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Análisis profundo (10,000 escenarios) y noticias de último momento
+// ---------------------------------------------------------------------------
+const newsKey = (n) => String(n.id != null ? n.id : n.headline);
+const REASON_TXT = { scan: 'análisis general', news: 'por noticia nueva', price: 'por movimiento de precio', manual: 'recalculado a mano' };
+
+function computeDeep(sym, { reason = 'scan', notifyChange = true } = {}) {
+  const a = state.analyses[sym];
+  if (!a || a.error) return null;
+  const d = deepAnalysis(a, state.companyNews[sym]);
+  if (!d) return null;
+  d.at = Date.now();
+  d.reason = reason;
+  state.deep[sym] = d;
+  const key = 'deepRecs:' + state.provider.mode;
+  const recs = load(key, {});
+  const prev = recs[sym];
+  if (prev !== d.rec.code) {
+    recs[sym] = d.rec.code;
+    save(key, recs);
+  }
+  if (notifyChange && state.settings.notifySignals && prev && prev !== d.rec.code) {
+    notify({
+      title: `🎯 ${sym}: ${d.rec.label}`,
+      body: `${d.rec.text} (${d.N.toLocaleString('en-US')} escenarios, margen de error ±${(d.moe * 100).toFixed(2)}%)`,
+      kind: d.rec.kind,
+      sym,
+    });
+  }
+  return d;
+}
+
+function reanalyze(sym) {
+  const raw = state.raw[sym];
+  if (!raw) return;
+  try {
+    state.analyses[sym] = analyze({ meta: meta(sym), history: state.hist[sym] || null, quote: state.quotes[sym] || null, fund: raw.fund, rec: raw.rec, news: state.companyNews[sym] });
+  } catch { /* conserva el análisis anterior */ }
+}
+
+let newsPolling = false;
+let lastNewsPoll = Date.now();
+async function pollFollowedNews() {
+  if (newsPolling || !state.provider || state.scanning) return;
+  newsPolling = true;
+  lastNewsPoll = Date.now();
+  const prov = state.provider;
+  const token = state.token;
+  try {
+    for (const sym of state.follow.slice(0, 15)) {
+      const a = state.analyses[sym];
+      if (!a || a.error) continue;
+      let items;
+      try { items = await prov.getCompanyNews(sym, { fresh: true }); } catch { continue; }
+      if (token !== state.token) return;
+      const known = state.newsSeen[sym];
+      const seen = new Set(known || []);
+      const fresh = items.filter((n) => !seen.has(newsKey(n)));
+      state.newsSeen[sym] = [...new Set([...items.map(newsKey), ...(known || [])])].slice(0, 100);
+      state.companyNews[sym] = items;
+      if (!known || !fresh.length) continue;
+      reanalyze(sym);
+      const d = computeDeep(sym, { reason: 'news', notifyChange: false });
+      if (state.settings.notifySignals) {
+        const cur = curOf(sym);
+        const h = d && d.h[5];
+        notify({
+          title: `📰 ${sym}: ${fresh.length > 1 ? fresh.length + ' noticias nuevas' : 'noticia de último momento'}`,
+          body: `"${fresh[0].headline}"` + (d ? ` → ${d.rec.emoji} ${d.rec.label}. En 1 semana: entre ${money(h.p5, cur)} y ${money(h.p95, cur)} (más probable ${money(h.p50, cur)}).` : ''),
+          kind: d ? d.rec.kind : 'info',
+          sym,
+        });
+      }
+      if (state.detail === sym) renderDetailBody();
+    }
+  } finally {
+    newsPolling = false;
+    save('newsSeen', state.newsSeen);
+    if (state.tab === 'siguiendo' || state.tab === 'noticias') scheduleRender();
+  }
+}
+setInterval(() => {
+  if (!state.provider) return;
+  const every = state.provider.mode === 'demo' ? 45e3 : 5 * 60e3;
+  if (Date.now() - lastNewsPoll >= every) pollFollowedNews();
+}, 15e3);
+
+function rangeBar(label, h, price, cur) {
+  const lo = h.p5;
+  const span = h.p95 - lo || 1;
+  const x = (v) => Math.max(0, Math.min(100, ((v - lo) / span) * 100));
+  return `<div class="rb">
+    <div class="rb-head"><b>${label}</b><span>Prob. de subir <b class="${h.probUp >= 0.5 ? 'up' : 'down'}">${Math.round(h.probUp * 100)}%</b></span></div>
+    <div class="rb-bar"><i class="rb-band" style="left:${x(h.p25)}%;width:${x(h.p75) - x(h.p25)}%"></i><i class="rb-now" style="left:${x(price)}%"></i><i class="rb-med" style="left:${x(h.p50)}%"></i></div>
+    <div class="rb-foot"><span class="down">${money(h.p5, cur)}<small>podría bajar ${pctR(h.p5 / price - 1)}</small></span><span class="mid">${money(h.p50, cur)}<small>más probable</small></span><span class="up">${money(h.p95, cur)}<small>podría subir ${pctR(h.p95 / price - 1)}</small></span></div>
+  </div>`;
+}
+
+function deepCard(sym) {
+  if (!state.follow.includes(sym)) {
+    return `<section class="card deep-cta">
+      <h3>🎯 Análisis profundo · 10,000 escenarios</h3>
+      <p class="hint" style="margin-top:0">Sigue esta empresa y Pulso vigilará sus noticias de último momento: cada vez que salga una noticia o el precio se mueva, simulará 10,000 escenarios y te dirá si conviene comprar ahora, esperar unos días o vender, con cuánto podría bajar o subir.</p>
+      <button class="btn primary block" style="margin-top:12px" data-action="follow" data-sym="${esc(sym)}">☆ Seguir y activar</button>
+    </section>`;
+  }
+  const d = state.deep[sym];
+  const a = state.analyses[sym];
+  if (!d) {
+    const noHist = a && !a.error && !isNum(a.tech.vol);
+    return `<section class="card"><h3>🎯 Análisis profundo</h3><p class="hint">${noHist ? 'Necesita el historial de precios (agrega tu clave de Twelve Data en Ajustes).' : 'Calculando 10,000 escenarios…'}</p></section>`;
+  }
+  const r = d.rec;
+  const cur = d.cur;
+  const ni = d.news;
+  return `<section class="card deep rec-${r.code}">
+    <div class="eyebrow">El modelo sugiere · ${d.N.toLocaleString('en-US')} escenarios</div>
+    <div class="rec-big">${r.emoji} ${r.label}</div>
+    <p>${esc(r.text)}</p>
+    <div class="rec-target"><span>${r.targetLabel}</span><b>${money(r.target, cur)}</b><small>${pctR(r.target / d.price - 1)}</small></div>
+    <div class="rec-conf">Confianza del modelo: <b>${r.confidence}</b> · señales consideradas:</div>
+    <div class="reasons">${r.reasons.map((x) => `<span class="ev ${x.dir > 0 ? 'buy' : x.dir < 0 ? 'sell' : 'info'}">${esc(x.txt)}</span>`).join('')}</div>
+    <h4 class="sub">¿Cuánto podría bajar o subir?</h4>
+    ${rangeBar('Mañana', d.h[1], d.price, cur)}
+    ${rangeBar('En 1 semana', d.h[5], d.price, cur)}
+    ${rangeBar('En 1 mes', d.h[21], d.price, cur)}
+    <p class="hint">Cada barra va del escenario malo (5%) al bueno (95%): 9 de cada 10 escenarios quedan dentro. La zona clara es el rango probable (la mitad de los escenarios), la línea blanca es el precio actual y el punto azul, el precio más probable.</p>
+    <div class="news-imp">📰 ${ni.count
+      ? `${ni.count} noticias en 72 h (${ni.pos} positivas, ${ni.neg} negativas) → efecto estimado ${pctR(d.params.newsWeek, 2)} en la semana y volatilidad ${pctR(d.params.sigmaEff / d.params.sigma - 1, 0)}.`
+      : 'Sin noticias recientes: la simulación usa solo el precio y su volatilidad.'}
+      ${ni.latest ? `<div class="latest">Última: "${esc(ni.latest.headline)}" · ${ago(ni.latest.datetime * 1000)}</div>` : ''}</div>
+    <div class="moe">🎯 Margen de error de la simulación: <b>±${(d.moe * 100).toFixed(2)}%</b> (95% de confianza)</div>
+    <details class="moe-info"><summary>¿Qué significa el margen de error?</summary>
+      <p>Con ${d.N.toLocaleString('en-US')} escenarios, las probabilidades y precios estimados tienen un error de cálculo de ±${(d.moe * 100).toFixed(2)}% o menos: si repitiéramos la simulación, saldría prácticamente igual. Si el error pasara de 1%, Pulso aumenta automáticamente los escenarios (hasta 40,000).</p>
+      <p>Eso <b>no</b> significa que el precio real vaya a quedar a ±1% de la estimación: el mercado reacciona a sorpresas que ningún modelo conoce. Por eso te mostramos el rango completo de cuánto podría bajar o subir.</p>
+    </details>
+    <div class="deep-foot"><span class="muted small">Calculado ${ago(d.at)} · ${REASON_TXT[d.reason] || ''}</span>
+      <button class="btn sm" data-action="deep-recalc" data-sym="${esc(sym)}">↻ Recalcular</button></div>
+  </section>`;
+}
+
+function deepMini(sym) {
+  const d = state.deep[sym];
+  if (!d) return '';
+  const h = d.h[5];
+  const cur = d.cur;
+  const r = d.rec;
+  const ni = d.news;
+  const fresh = ni.latest && Date.now() / 1000 - ni.latest.datetime < 12 * 3600;
+  return `<div class="deep-mini rec-${r.code}">
+    <div class="dm-rec">${r.emoji} ${r.label}</div>
+    <div class="dm-range">En 1 semana: entre <b class="down">${money(h.p5, cur)}</b> y <b class="up">${money(h.p95, cur)}</b> · más probable <b>${money(h.p50, cur)}</b></div>
+    <div class="dm-meta">🎯 ${d.N.toLocaleString('en-US')} escenarios · margen ±${(d.moe * 100).toFixed(2)}% · confianza ${r.confidence.toLowerCase()}</div>
+    ${fresh ? `<div class="dm-news">📰 ${ago(ni.latest.datetime * 1000)}: ${esc(ni.latest.headline)}</div>` : ''}
+  </div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +650,7 @@ function initProvider() {
   if (state.provider) state.provider.disconnect();
   state.token++;
   state.provider = createProvider(state.settings);
-  Object.assign(state, { analyses: {}, quotes: {}, hist: {}, profiles: {}, pulse: null, news: [], companyNews: {}, scanning: false, conn: 'off' });
+  Object.assign(state, { analyses: {}, quotes: {}, hist: {}, profiles: {}, pulse: null, news: [], companyNews: {}, scanning: false, conn: 'off', deep: {}, raw: {} });
   state.provider.connect(liveSymbols(), onTick, (s) => {
     state.conn = s;
     renderChrome();
@@ -512,7 +680,15 @@ async function analyzeOne(sym, prov, token) {
     }
     if (profile) state.profiles[sym] = profile;
     state.companyNews[sym] = news || [];
+    state.raw[sym] = { fund, rec };
     state.analyses[sym] = analyze({ meta: m, history: hist, quote: state.quotes[sym] || null, fund, rec, news });
+    if (state.follow.includes(sym)) {
+      if (!state.newsSeen[sym]) {
+        state.newsSeen[sym] = (news || []).map(newsKey).slice(0, 100);
+        save('newsSeen', state.newsSeen);
+      }
+      computeDeep(sym, { reason: 'scan' });
+    }
   } catch (e) {
     if (token !== state.token) return;
     state.analyses[sym] = { sym, name: m.n, sec: m.sec, error: e.message || 'Error' };
@@ -845,6 +1021,7 @@ function renderDetailBody() {
       </div>
       <div class="horizon"><span>¿Conviene a corto o largo plazo?</span><b>${esc(v.horizon)}</b></div>
     </section>
+    ${deepCard(sym)}
     ${a.events.length ? `<section class="card"><h3>⚡ Eventos técnicos recientes</h3><div class="events">${a.events.map((e) => `<span class="ev ${e.type}">${esc(e.txt)}</span>`).join('')}</div></section>` : ''}
     ${mcHtml}
     <section class="card pc">
@@ -990,6 +1167,14 @@ function toggleFollow(sym, force) {
     if (b.classList.contains('icon-btn')) b.classList.toggle('on', on);
     else b.textContent = on ? '★ Siguiendo' : '☆ Seguir';
   });
+  if (on && state.analyses[sym] && !state.analyses[sym].error) {
+    if (!state.newsSeen[sym]) {
+      state.newsSeen[sym] = (state.companyNews[sym] || []).map(newsKey).slice(0, 100);
+      save('newsSeen', state.newsSeen);
+    }
+    computeDeep(sym, { reason: 'manual', notifyChange: false });
+  }
+  if (state.detail === sym) renderDetailBody();
   if (state.tab === 'siguiendo') renderView();
 }
 
@@ -1171,6 +1356,12 @@ async function handleAction(action, el) {
     case 'follow': toggleFollow(sym); break;
     case 'unfollow': toggleFollow(sym, false); break;
     case 'add-follow': addFollow(sym, el.dataset.name); break;
+    case 'deep-recalc': {
+      const d = computeDeep(sym, { reason: 'manual', notifyChange: false });
+      renderDetailBody();
+      if (d) toast({ title: `🎯 ${sym} recalculado`, body: `${d.N.toLocaleString('en-US')} escenarios · ${d.rec.label}`, kind: 'info' });
+      break;
+    }
     case 'alert': openAlertEditor(sym); break;
     case 'alert-save': saveAlert(sym); break;
     case 'alert-delete':
