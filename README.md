@@ -20,6 +20,7 @@ cuando una acción llega al precio que tú marques.
 | **Detalle de empresa** | Gráfica de velas con medias de 50 y 200 días, veredicto honesto ("Pinta bien", "Mala idea por ahora"…), si conviene a corto o largo plazo, abanico de 1,000 escenarios, lo bueno y lo malo, indicadores, consenso de analistas y noticias. |
 | **Siguiendo** | Tus empresas con precio en vivo, alertas de precio mínimo/máximo, probabilidad de que toquen tu precio, y "Modo vigilancia" (mantiene la pantalla encendida). |
 | **🎯 Análisis profundo** | Para las empresas que sigues: 10,000 escenarios con el efecto de las noticias de último momento. Se recalcula solo cuando sale una noticia o el precio se mueve más de 1.5%. Te dice **Compra ahora / Preferible esperar unos días para comprar / Vende en unos días / Vende ahora / Mantén**, con cuánto podría bajar o subir mañana, en 1 semana y en 1 mes. |
+| **📏 Precisión medida** | Prueba histórica: las mismas reglas aplicadas semana a semana a 10 años de precios reales (sin ver el futuro) y comparadas con lo que pasó. Muestra si cada sugerencia acierta más que el azar, si los rangos están calibrados y si seguirlas gana más que comprar y mantener. Con tus claves puedes repetirla desde la app. |
 | **Noticias** | Noticias del mercado y de tus empresas con sentimiento automático (positiva/negativa/neutral). |
 | **🔔 Notificaciones** | Señales nuevas de COMPRA/VENTA, eventos técnicos (cruce dorado, MACD, RSI) y alertas de precio, con sonido y vibración. |
 
@@ -78,6 +79,20 @@ Las claves se guardan solo en tu teléfono. El primer análisis en vivo tarda un
 límites gratuitos; después usa caché y es rápido.
 
 ---
+
+## 📏 Resultado de la prueba histórica (29 empresas, 2016–2026, 14,631 decisiones)
+
+| Qué se midió | Resultado |
+|---|---|
+| Rango del 90% a 1 día / 1 semana / 1 mes | El precio real quedó dentro el **89.1% / 89.3% / 90.1%** de las veces → **bien calibrado** |
+| "Compra ahora" | 58.3% de aciertos vs 56.2% al azar → **sin ventaja demostrada** |
+| "Esperar unos días para comprar" | 47.1% vs 49.5% → **peor que el azar** |
+| "Vende en unos días" | 55.6% vs 60.2% → **peor que el azar** |
+| "Vende ahora" | 42.5% vs 43.9% → **sin ventaja demostrada** |
+| Seguir las sugerencias | 8.7% al año vs 23.4% comprar y mantener (y 15.0% el S&P 500) |
+
+Conclusión honesta: los rangos de riesgo son confiables; las sugerencias de compra/venta, todavía no.
+La prueba solo mide las reglas técnicas y la simulación (no hay historial gratuito de fundamentales y noticias).
 
 ## ⚠️ Limitaciones (siendo sinceros)
 

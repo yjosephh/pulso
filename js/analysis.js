@@ -246,7 +246,24 @@ export function simulate(a, days, opts = {}) {
 // ---------------------------------------------------------------------------
 const pctTxt = (x, d = 1) => (x >= 0 ? '+' : '') + (x * 100).toFixed(d) + '%';
 
-export function analyze({ meta, history, quote, fund, rec, news }) {
+// Función de distribución normal (aproximación de Abramowitz-Stegun, error < 1e-7).
+export function normCdf(x) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const d = 0.3989423 * Math.exp((-x * x) / 2);
+  const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return x > 0 ? 1 - p : p;
+}
+
+function analyticMc(a, days) {
+  const { mu, sigma } = mcParams(a);
+  const T = days / 252;
+  const m = (mu - 0.5 * sigma * sigma) * T;
+  const s = sigma * Math.sqrt(T);
+  const q = (z) => a.price * Math.exp(m + s * z);
+  return { days, paths: 0, mu, sigma, probUp: normCdf(m / s), p5: q(-1.6449), p25: q(-0.6745), p50: q(0), p75: q(0.6745), p95: q(1.6449), levelProb: [], fan: [] };
+}
+
+export function analyze({ meta, history, quote, fund, rec, news, fastMc = false }) {
   const a = {
     sym: meta.s,
     name: meta.n,
@@ -442,8 +459,10 @@ export function analyze({ meta, history, quote, fund, rec, news }) {
 
   // ---------------- Monte Carlo (1,000 + 1,000 escenarios) ----------------
   if (isNum(a.tech.vol)) {
-    a.mcShort = simulate(a, 21);
-    a.mcLong = simulate(a, 252);
+    // En la prueba histórica se usa la fórmula exacta (lognormal) en lugar de
+    // 1,000 caminos al azar: mismo resultado sin el ruido y miles de veces más rápido.
+    a.mcShort = fastMc ? analyticMc(a, 21) : simulate(a, 21);
+    a.mcLong = fastMc ? analyticMc(a, 252) : simulate(a, 252);
     add(S, 'mc', 'Simulación 1 mes (1,000 escenarios)', (a.mcShort.probUp - 0.5) * 4, 0.5);
     add(L, 'mc', 'Simulación 1 año (1,000 escenarios)', (a.mcLong.probUp - 0.5) * 3, 0.5);
     const med = a.mcLong.p50 / a.price - 1;

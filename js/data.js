@@ -427,6 +427,29 @@ export class LiveProvider {
     return null;
   }
 
+  // ~11 años de cierres diarios ajustados por divisiones y dividendos (prueba histórica).
+  async getLongHistory(sym, size = 2800) {
+    if (!this.tdKey) throw new Error('Falta la clave de Twelve Data');
+    const url = new URL(TD + '/time_series');
+    url.searchParams.set('symbol', sym);
+    url.searchParams.set('interval', '1day');
+    url.searchParams.set('outputsize', String(size));
+    url.searchParams.set('adjust', 'all');
+    url.searchParams.set('apikey', this.tdKey);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await this.tdLimit.schedule(() => fetch(url).then((r) => r.json()));
+      if (res && res.status === 'ok' && Array.isArray(res.values)) {
+        return res.values.map((v) => ({ time: v.datetime.slice(0, 10), open: +v.open, high: +v.high, low: +v.low, close: +v.close, volume: +v.volume || 0 })).reverse();
+      }
+      if (res && res.code === 429 && attempt === 0) {
+        await sleep(61e3);
+        continue;
+      }
+      throw new Error((res && res.message) || 'Sin historial disponible');
+    }
+    return null;
+  }
+
   async getProfile(sym) {
     const ck = 'p:' + sym;
     const hit = cacheGet(ck, 7 * DAY);

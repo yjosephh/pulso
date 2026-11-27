@@ -8,6 +8,7 @@ import {
   requestNotifPermission, getHistory, unreadCount, markAllRead, clearHistory,
 } from './notify.js';
 import { load, save, clearCache, clearAll } from './store.js';
+import { runBacktest } from './backtest.js';
 
 // ---------------------------------------------------------------------------
 // Utilidades
@@ -39,7 +40,7 @@ function ago(ts) {
 // Estado
 // ---------------------------------------------------------------------------
 const DEFAULTS = { mode: 'demo', finnhubKey: '', tdKey: '', scanEvery: 15, notifySignals: true, sound: true };
-const TABS = ['mercado', 'ranking', 'siguiendo', 'noticias', 'ajustes'];
+const TABS = ['mercado', 'ranking', 'siguiendo', 'noticias', 'ajustes', 'precision'];
 
 const state = {
   settings: { ...DEFAULTS, ...load('settings', {}) },
@@ -75,6 +76,7 @@ const state = {
   deep: {},
   raw: {},
   newsSeen: load('newsSeen', {}),
+  bt: { ref: null, user: load('bt:user', null), show: 'auto', running: false, stop: false, prog: null, refLoading: true },
 };
 configureNotify({ sound: state.settings.sound });
 
@@ -163,6 +165,7 @@ function viewMercado() {
       ${progressNote()}
       ${hero}
     </section>
+    ${precisionCard()}
     <section>
       <div class="sec-title"><h3>Índices</h3><span class="muted">${esc(state.status ? state.status.label : '')}</span></div>
       <div class="idx-grid">${idx}</div>
@@ -351,6 +354,7 @@ function viewAjustes() {
         </select></div>
       <p class="hint">Las alertas de precio se revisan en cada movimiento del precio y suenan al instante mientras Pulso esté abierta (o en segundo plano reciente). En iPhone, primero instala la app en la pantalla de inicio para poder recibir notificaciones.</p>
     </section>
+    <a class="card prec-link" href="#/precision"><b>📏 Precisión medida</b><span class="muted small">Ver qué tan seguido aciertan las reglas en 11 años de datos reales →</span></a>
     <details class="card">
       <summary>🧠 ¿Cómo analiza Pulso?</summary>
       <div class="hint" style="margin:0">
@@ -373,7 +377,229 @@ function viewAjustes() {
     ${disclaimer()}`;
 }
 
-const VIEWS = { mercado: viewMercado, ranking: viewRanking, siguiendo: viewSiguiendo, noticias: viewNoticias, ajustes: viewAjustes };
+// ---------------------------------------------------------------------------
+// Precisión medida (prueba histórica)
+// ---------------------------------------------------------------------------
+const REC_LABEL = { 'buy-now': '🟢 Compra ahora', 'buy-wait': '🟡 Esperar unos días para comprar', 'sell-wait': '🟠 Vende en unos días', 'sell-now': '🔴 Vende ahora', hold: '⚪ Mantén y vigila' };
+const SIG_LABEL = { buy: '📈 Señal COMPRA', sell: '📉 Señal VENTA' };
+const VERDICT = { ventaja: ['buy', 'VENTAJA REAL'], azar: ['hold', 'IGUAL QUE EL AZAR'], peor: ['sell', 'PEOR QUE EL AZAR'] };
+const pp = (x, d = 1) => (isNum(x) ? (x * 100).toFixed(d) + '%' : '—');
+const pts = (x) => (isNum(x) ? (x >= 0 ? '+' : '') + (x * 100).toFixed(1) + ' pts' : '—');
+
+function btResults() {
+  const b = state.bt;
+  if (b.show === 'user' && b.user) return b.user;
+  if (b.show === 'ref' && b.ref) return b.ref;
+  return b.user || b.ref;
+}
+
+async function loadBtRef() {
+  try {
+    const r = await fetch('data/backtest-ref.json', { cache: 'no-cache' });
+    state.bt.ref = r.ok ? await r.json() : null;
+  } catch { state.bt.ref = null; }
+  state.bt.refLoading = false;
+  if (state.tab === 'precision' || state.tab === 'mercado') scheduleRender();
+  if (state.detail) renderDetailBody();
+}
+
+function btConclusions(R) {
+  const out = [];
+  const codes = ['buy-now', 'buy-wait', 'sell-wait', 'sell-now'].map((k) => [k, R.codes[k]]).filter(([, c]) => c && c.n >= 30);
+  const adv = codes.filter(([, c]) => c.verdict === 'ventaja');
+  const worse = codes.filter(([, c]) => c.verdict === 'peor');
+  if (!adv.length) {
+    out.push({ tone: 'bad', txt: `Ninguna de las ${codes.length} sugerencias superó al azar de forma confiable${worse.length ? ` y ${worse.length} fue${worse.length > 1 ? 'ron peores' : ' peor'} que el azar` : ''}. Hoy las sugerencias de compra/venta NO tienen ventaja demostrada.` });
+  } else {
+    out.push({ tone: 'good', txt: `Con ventaja real sobre el azar: ${adv.map(([k, c]) => `${REC_LABEL[k]} (${pts(c.edge)})`).join(', ')}.` });
+    const rest = codes.filter(([, c]) => c.verdict !== 'ventaja');
+    if (rest.length) out.push({ tone: 'warn', txt: `Sin ventaja: ${rest.map(([k, c]) => `${REC_LABEL[k]} (${pts(c.edge)}${c.verdict === 'peor' ? ', peor que el azar' : ''})`).join(', ')}.` });
+  }
+  const cov = R.coverage[5].in90;
+  const d = cov - 0.9;
+  out.push({
+    tone: Math.abs(d) <= 0.03 ? 'good' : 'warn',
+    txt: Math.abs(d) <= 0.03
+      ? `Los rangos de "cuánto podría bajar o subir" están bien calibrados: a 1 semana, el precio real quedó dentro del rango del 90% el ${pp(cov)} de las veces.`
+      : d < 0
+        ? `Los rangos son demasiado estrechos: a 1 semana, el precio real quedó dentro del rango "del 90%" solo el ${pp(cov)} de las veces.`
+        : `Los rangos son algo amplios: a 1 semana, el precio real quedó dentro el ${pp(cov)} de las veces (lo ideal es 90%).`,
+  });
+  const S = R.strategy;
+  out.push({ tone: S.deep.cagr > S.bh.cagr ? 'good' : 'bad', txt: `Seguir las sugerencias (comprar en "Compra ahora", vender en "Vende") dio ${pp(S.deep.cagr)} al año contra ${pp(S.bh.cagr)} de solo comprar y mantener; le ganó en ${S.deep.beats} de ${S.n} empresas.` });
+  out.push({ tone: S.sig.cagr > S.bh.cagr ? 'good' : 'bad', txt: `Seguir la señal COMPRA/VENTA dio ${pp(S.sig.cagr)} al año (le ganó a comprar y mantener en ${S.sig.beats} de ${S.n} empresas).` });
+  if (R.spy) out.push({ tone: 'neutral', txt: `Referencia: comprar el S&P 500 (SPY) y no tocarlo dio ${pp(R.spy.cagr)} al año en el mismo periodo.` });
+  return out;
+}
+
+function btProgHtml() {
+  const p = state.bt.prog;
+  if (!p) return '';
+  return `<div class="scanning-note"><span>${esc(p.phase || '')} ${esc(p.sym || '')} · ${(p.i || 0) + 1}/${p.total || '…'}</span><div class="progress"><i style="width:${Math.round((p.frac || 0) * 100)}%"></i></div></div>`;
+}
+
+function btLine(sym, code) {
+  const R = btResults();
+  if (!R) return '';
+  if (code === 'hold') return `<a class="bt-line" href="#/precision">📏 "Mantén y vigila" no es una apuesta, así que no tiene tasa de acierto. Ver la precisión medida →</a>`;
+  const g = R.codes[code];
+  if (!g || !g.n) return '';
+  const y1 = R.period.from.slice(0, 4);
+  const y2 = R.period.to.slice(0, 4);
+  const ps = R.per[sym] && R.per[sym].codes[code];
+  let txt;
+  if (ps && ps[0] >= 15) txt = `en ${sym} (${y1}–${y2}) esta sugerencia salió ${ps[0]} veces y acertó ${pp(ps[1])}; al azar pasaba ${pp(ps[2])} (${pts(ps[1] - ps[2])}).`;
+  else txt = `en ${R.symbols} empresas (${y1}–${y2}) esta sugerencia acertó ${pp(g.hit)} de ${g.n.toLocaleString('en-US')} veces; al azar pasaba ${pp(g.base)}.`;
+  const v = VERDICT[g.verdict];
+  return `<a class="bt-line" href="#/precision">📏 Historial real: ${txt} En general: <span class="sig ${v[0]}">${v[1]}</span> →</a>`;
+}
+
+function precisionCard() {
+  const R = btResults();
+  if (!R) return '';
+  const codes = ['buy-now', 'buy-wait', 'sell-wait', 'sell-now'].map((k) => R.codes[k]).filter((c) => c && c.n >= 30);
+  const adv = codes.filter((c) => c.verdict === 'ventaja').length;
+  return `<a class="card prec-card" href="#/precision">
+    <div class="eyebrow">Precisión medida · ${Math.round(R.years)} años de datos reales</div>
+    <div class="prec-grid">
+      <div><b class="${adv ? 'up' : 'down'}">${adv}/${codes.length}</b><span>sugerencias con ventaja real</span></div>
+      <div><b>${pp(R.coverage[5].in90, 0)}</b><span>aciertos del rango a 1 semana (ideal 90%)</span></div>
+      <div><b class="${R.strategy.deep.cagr > R.strategy.bh.cagr ? 'up' : 'down'}">${pp(R.strategy.deep.cagr)}</b><span>al año vs ${pp(R.strategy.bh.cagr)} comprar y mantener</span></div>
+    </div>
+    <span class="muted small">Ver la prueba completa →</span>
+  </a>`;
+}
+
+function viewPrecision() {
+  const b = state.bt;
+  const R = btResults();
+  const live = state.provider && state.provider.mode === 'live' && state.settings.tdKey;
+  const runBox = `<section class="card">
+    <h3>🔁 Repetir la prueba con mis datos</h3>
+    <p class="hint" style="margin-top:0">Descarga ~11 años de cada empresa que sigue Pulso con tu clave de Twelve Data (1 consulta por empresa; tarda ~5 min por el límite gratuito) y vuelve a probar todas las reglas.</p>
+    <div id="bt-prog">${b.running ? btProgHtml() : ''}</div>
+    ${b.running
+      ? '<button class="btn danger block" data-action="bt-stop">Detener</button>'
+      : `<button class="btn primary block" data-action="bt-run" ${live ? '' : 'disabled'}>Ejecutar prueba histórica</button>${live ? '' : '<p class="hint warn">Necesitas el modo En vivo con tu clave de Twelve Data (Ajustes).</p>'}`}
+  </section>`;
+  const head = `<div class="page-head"><h2>📏 Precisión medida</h2><p>Las reglas de Pulso probadas contra lo que realmente pasó en el mercado</p></div>`;
+  if (!R) return head + (b.refLoading ? '<div class="skel" style="height:200px"></div>' : '<div class="empty">Todavía no hay resultados.</div>') + runBox + disclaimer();
+
+  const toggle = b.user && b.ref ? `<div class="seg">
+      <button class="${R === b.ref ? 'active' : ''}" data-bt="ref">Referencia</button>
+      <button class="${R === b.user ? 'active' : ''}" data-bt="user">Mi prueba</button></div>` : '';
+  const codeRow = (label, c) => (c && c.n ? `<div class="bt-row">
+      <div class="bt-name">${label}<small>${c.n.toLocaleString('en-US')} veces · cuenta como acierto si ${esc(c.desc)}</small></div>
+      <div class="bt-nums"><b>${pp(c.hit)}</b><small>azar ${pp(c.base)}</small></div>
+      <div class="bt-edge"><span class="sig ${VERDICT[c.verdict][0]}">${VERDICT[c.verdict][1]}</span><small>${pts(c.edge)} · margen ±${(c.ci * 100).toFixed(1)}</small></div>
+    </div>` : '');
+  const cov = (h, label) => {
+    const c = R.coverage[h];
+    const ok90 = Math.abs(c.in90 - 0.9) <= 0.03;
+    const ok50 = Math.abs(c.in50 - 0.5) <= 0.03;
+    return `<tr><td>${label}</td><td class="${ok90 ? 'up' : 'down'}">${pp(c.in90)}</td><td class="${ok50 ? 'up' : 'down'}">${pp(c.in50)}</td></tr>`;
+  };
+  const S = R.strategy;
+  const stat = (label, x, sub, good) => `<div class="ind"><span>${label}</span><b class="${good == null ? '' : good ? 'up' : 'down'}">${x}</b><small>${sub}</small></div>`;
+  const perRows = Object.entries(R.per).sort((a, b2) => (b2[1].deep - b2[1].bh) - (a[1].deep - a[1].bh)).map(([sym, x]) =>
+    `<tr><td><b>${esc(sym)}</b></td><td>${pp(x.cov90[1], 0)}</td><td class="${x.deep > x.bh ? 'up' : 'down'}">${pp(x.deep)}</td><td class="${x.sig > x.bh ? 'up' : 'down'}">${pp(x.sig)}</td><td>${pp(x.bh)}</td></tr>`).join('');
+
+  return `${head}
+    ${toggle}
+    <section class="card glow">
+      <div class="eyebrow">${esc(R.source)}</div>
+      <h3 style="margin-top:6px">${R.symbols} empresas · ${R.period.from} a ${R.period.to} · ${R.evals.toLocaleString('en-US')} decisiones simuladas</h3>
+      <ul class="bt-concl">${btConclusions(R).map((c) => `<li class="tone-${c.tone}">${esc(c.txt)}</li>`).join('')}</ul>
+      <p class="hint">Cómo se hizo: cada semana de esos años, Pulso aplicó sus reglas usando solo los precios conocidos hasta ese día (sin ver el futuro) y después se comparó con lo que realmente pasó. Comisión supuesta: ${(R.commission * 100).toFixed(1)}% por operación.</p>
+    </section>
+    <section class="card">
+      <h3>🎯 ¿Las sugerencias aciertan más que el azar?</h3>
+      <p class="hint" style="margin-top:0">"Azar" es qué tan seguido pasaba eso de todos modos en esas mismas empresas (por ejemplo, las acciones suben en ~55% de las semanas). Una sugerencia solo sirve si acierta claramente más que eso.</p>
+      ${['buy-now', 'buy-wait', 'sell-wait', 'sell-now'].map((k) => codeRow(REC_LABEL[k], R.codes[k])).join('')}
+      ${R.codes['buy-wait'] && R.codes['buy-wait'].n ? `<p class="hint">Piso estimado (al esperar para comprar): se alcanzó el ${pp(R.codes['buy-wait'].reachTarget)} de las veces · techo estimado (al vender en unos días): ${pp(R.codes['sell-wait'].reachTarget)} (lo ideal es ~50%).</p>` : ''}
+      <h4 class="sub" style="margin:16px 0 4px;font-size:14px">Señal de corto plazo (Ranking)</h4>
+      ${['buy', 'sell'].map((k) => codeRow(SIG_LABEL[k], R.signals[k])).join('')}
+    </section>
+    <section class="card">
+      <h3>📐 ¿Los rangos de "cuánto podría bajar o subir" son confiables?</h3>
+      <table class="bt-table"><thead><tr><th>Horizonte</th><th>Dentro del rango 90%</th><th>Dentro del rango 50%</th></tr></thead>
+        <tbody>${cov(1, 'Mañana')}${cov(5, '1 semana')}${cov(21, '1 mes')}</tbody></table>
+      <p class="hint">Si los rangos estuvieran perfectamente calibrados, el precio real caería dentro del rango del 90% nueve de cada diez veces y dentro del del 50% la mitad de las veces. Verde = a menos de 3 puntos de lo ideal.</p>
+    </section>
+    <section class="card">
+      <h3>💰 ¿Seguir a Pulso gana más que comprar y mantener?</h3>
+      <div class="ind-grid">
+        ${stat('Seguir sugerencias', pp(S.deep.cagr) + ' /año', `caída máx. ${pp(S.deep.mdd, 0)} · invertido ${pp(S.deep.exposure, 0)} del tiempo · ${Math.round(S.deep.trades)} operaciones`, S.deep.cagr > S.bh.cagr)}
+        ${stat('Seguir señal COMPRA/VENTA', pp(S.sig.cagr) + ' /año', `caída máx. ${pp(S.sig.mdd, 0)} · invertido ${pp(S.sig.exposure, 0)} del tiempo · ${Math.round(S.sig.trades)} operaciones`, S.sig.cagr > S.bh.cagr)}
+        ${stat('Comprar y mantener', pp(S.bh.cagr) + ' /año', `caída máx. ${pp(S.bh.mdd, 0)} (promedio por empresa)`, null)}
+        ${R.spy ? stat('S&P 500 (SPY)', pp(R.spy.cagr) + ' /año', `caída máx. ${pp(R.spy.mdd, 0)}`, null) : ''}
+      </div>
+      <p class="hint">Promedio por empresa, con decisiones una vez por semana. Las estrategias pasan tiempo fuera del mercado; por eso suelen tener caídas máximas menores pero también menos ganancia.</p>
+    </section>
+    <details class="card">
+      <summary>🏢 Resultado por empresa</summary>
+      <table class="bt-table"><thead><tr><th></th><th>Rango 90% (1 sem)</th><th>Sugerencias</th><th>Señal</th><th>Comprar y mantener</th></tr></thead><tbody>${perRows}</tbody></table>
+      <p class="hint">Rendimiento anual promedio de cada forma de invertir en esa empresa.</p>
+    </details>
+    <section class="card">
+      <h3>⚠️ Lo que esta prueba NO mide</h3>
+      <ul class="bt-concl">
+        <li>Fundamentales, analistas y noticias: no hay historial gratuito de cómo estaban en cada fecha, así que solo se probaron las reglas técnicas y la simulación. Esa parte de la app sigue sin medirse.</li>
+        <li>Sesgo de supervivencia: las empresas son las ganadoras de hoy; en 2016 nadie sabía que NVIDIA o Lilly subirían tanto. Eso infla el "comprar y mantener".</li>
+        <li>Un solo periodo (mayormente alcista). En un mercado bajista largo los resultados podrían ser distintos.</li>
+        <li>No incluye impuestos ni el diferencial de precio al comprar/vender.</li>
+      </ul>
+    </section>
+    ${runBox}
+    ${disclaimer()}`;
+}
+
+async function runUserBacktest() {
+  const b = state.bt;
+  if (b.running) return;
+  const prov = state.provider;
+  if (!prov || prov.mode !== 'live' || !state.settings.tdKey || !prov.getLongHistory) {
+    toast({ title: 'Falta configurar', body: 'Activa el modo En vivo con tu clave de Twelve Data.', kind: 'info' });
+    return;
+  }
+  b.running = true;
+  b.stop = false;
+  const metas = [...allCompanies().filter((c) => !c.intl), INDICES[0]];
+  b.prog = { phase: 'Descargando', sym: '', i: 0, total: metas.length, frac: 0 };
+  if (state.tab === 'precision') renderView();
+  const upd = () => { const el = $('#bt-prog'); if (el) el.innerHTML = btProgHtml(); };
+  const datasets = [];
+  const errors = [];
+  for (let i = 0; i < metas.length && !b.stop; i++) {
+    b.prog = { phase: 'Descargando historial de', sym: metas[i].s, i, total: metas.length, frac: (i / metas.length) * 0.5 };
+    upd();
+    try {
+      const bars = await prov.getLongHistory(metas[i].s);
+      if (bars && bars.length > 320) datasets.push({ meta: metas[i], bars });
+    } catch (e) { errors.push(metas[i].s + ': ' + e.message); }
+  }
+  let res = null;
+  if (!b.stop && datasets.length > 1) {
+    res = await runBacktest(datasets, {
+      source: 'Twelve Data · tus datos (precios ajustados)',
+      shouldStop: () => b.stop,
+      onProgress: (p) => { b.prog = { phase: 'Probando reglas en', sym: p.sym, i: p.i, total: p.total, frac: 0.5 + p.frac * 0.5 }; upd(); },
+    });
+  }
+  b.running = false;
+  b.prog = null;
+  if (res && !b.stop) {
+    b.user = res;
+    b.show = 'user';
+    save('bt:user', res);
+    notify({ title: '📏 Prueba histórica terminada', body: `${res.symbols} empresas, ${res.evals.toLocaleString('en-US')} decisiones simuladas.${errors.length ? ` Sin datos: ${errors.length}.` : ''}`, kind: 'info' });
+  } else if (!b.stop) {
+    toast({ title: 'No se pudo completar', body: errors[0] || 'Sin datos suficientes.', kind: 'info' });
+  }
+  if (state.tab === 'precision') renderView();
+}
+
+const VIEWS = { mercado: viewMercado, ranking: viewRanking, siguiendo: viewSiguiendo, noticias: viewNoticias, ajustes: viewAjustes, precision: viewPrecision };
 
 // ---------------------------------------------------------------------------
 // Renderizado
@@ -602,6 +828,7 @@ function deepCard(sym) {
     <div class="rec-big">${r.emoji} ${r.label}</div>
     <p>${esc(r.text)}</p>
     <div class="rec-target"><span>${r.targetLabel}</span><b>${money(r.target, cur)}</b><small>${pctR(r.target / d.price - 1)}</small></div>
+    ${btLine(sym, r.code)}
     <div class="rec-conf">Confianza del modelo: <b>${r.confidence}</b> · señales consideradas:</div>
     <div class="reasons">${r.reasons.map((x) => `<span class="ev ${x.dir > 0 ? 'buy' : x.dir < 0 ? 'sell' : 'info'}">${esc(x.txt)}</span>`).join('')}</div>
     <h4 class="sub">¿Cuánto podría bajar o subir?</h4>
@@ -1356,6 +1583,8 @@ async function handleAction(action, el) {
     case 'follow': toggleFollow(sym); break;
     case 'unfollow': toggleFollow(sym, false); break;
     case 'add-follow': addFollow(sym, el.dataset.name); break;
+    case 'bt-run': runUserBacktest(); break;
+    case 'bt-stop': state.bt.stop = true; break;
     case 'deep-recalc': {
       const d = computeDeep(sym, { reason: 'manual', notifyChange: false });
       renderDetailBody();
@@ -1441,6 +1670,8 @@ function bindEvents() {
       else renderView();
       return;
     }
+    const bts = e.target.closest('[data-bt]');
+    if (bts) { state.bt.show = bts.dataset.bt; renderView(); return; }
     const nf = e.target.closest('[data-news]');
     if (nf) { state.newsFilter = nf.dataset.news; renderView(); return; }
     const md = e.target.closest('[data-mode]');
@@ -1532,6 +1763,7 @@ function boot() {
   if (!load('accepted', null)) showOnboarding();
   runScan();
   scheduleScans();
+  loadBtRef();
   setInterval(() => {
     // refresca los "hace X min" sin molestar
     if (state.tab === 'mercado' && !state.scanning) scheduleRender();
